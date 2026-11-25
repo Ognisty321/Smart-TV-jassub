@@ -17,7 +17,7 @@
 	// Worker file name to the files that worker reads by relative URL.
 	const WORKERS = {
 		'subtitles-octopus-worker.js': ['subtitles-octopus-worker.wasm', 'ass-fallback-font.ttf'],
-		'jassub-worker.js': ['jassub-worker.wasm', 'jassub-worker-modern.wasm', 'jassub-default.woff2', 'ass-fallback-font.ttf'],
+		'jassub-worker.js': ['jassub-worker.wasm', 'ass-fallback-font.ttf'],
 		'libarchive-worker.js': ['libarchive.wasm'],
 		'pdf.worker.min.js': []
 	};
@@ -60,28 +60,29 @@
 	// Runs inside the worker. It holds the app's messages until the real worker
 	// script is in place, then replays them in order.
 	const BOOTSTRAP = [
-		'const queued = [];',
+		'self.__moonfinVegaWorker = true;',
+	'const queued = [];',
 		'let assets = {};',
 		'const toBytes = ' + toBytes.toString() + ';',
 		'const queue = function (e) { if (!e.data || !e.data.__moonfin) queued.push(e.data); };',
 		'self.addEventListener("message", queue);',
 		'const assetName = function (url) {',
 		'	const name = String(url).split("?")[0].split("#")[0].split("/").pop();',
-\t	'\treturn Object.prototype.hasOwnProperty.call(assets, name) ? name : null;',
+		'\treturn Object.prototype.hasOwnProperty.call(assets, name) ? name : null;',
 		'};',
 		'const dataUrl = function (name) {',
 		'\tconst type = /\\.wasm$/.test(name) ? "application/wasm" : "application/octet-stream";',
 		'\treturn "data:" + type + ";base64," + assets[name];',
-\t	'};',
+		'};',
 		'const open = XMLHttpRequest.prototype.open;',
 		'XMLHttpRequest.prototype.open = function (method, url, ...rest) {',
 		'	const name = assetName(url);',
-\t	'\treturn open.call(this, method, name ? dataUrl(name) : url, ...rest);',
+		'\treturn open.call(this, method, name ? dataUrl(name) : url, ...rest);',
 		'};',
 		'const nativeFetch = self.fetch;',
 		'self.fetch = function (url, init) {',
 		'	const name = assetName(url);',
-\t	'\treturn nativeFetch.call(self, name ? dataUrl(name) : url, init);',
+		'\treturn nativeFetch.call(self, name ? dataUrl(name) : url, init);',
 		'};',
 		'self.addEventListener("message", function start(e) {',
 		'	const d = e.data;',

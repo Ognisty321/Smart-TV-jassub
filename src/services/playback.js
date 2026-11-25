@@ -1071,6 +1071,35 @@ const supportedAssFontMimeTypes = [
 	'font/woff2'
 ];
 
+export const getVideoStorageSize = () => {
+	const videoStream = currentSession?.mediaSource?.MediaStreams?.find((stream) => stream.Type === 'Video');
+	const width = Number(videoStream?.Width);
+	const height = Number(videoStream?.Height);
+	return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+		? { width: Math.round(width), height: Math.round(height) }
+		: null;
+};
+
+// Canvas-mode libass cannot inspect decoded VideoFrames, so approximate the display matrix from
+// the stream metadata. HD television is BT.709 when unspecified; SD television is BT.601.
+export const getVideoColorSpace = () => {
+	const videoStream = currentSession?.mediaSource?.MediaStreams?.find((stream) => stream.Type === 'Video');
+	if (!videoStream) return null;
+	const raw = `${videoStream.ColorSpace || ''} ${videoStream.ColorPrimaries || ''}`.toLowerCase().replace(/[\s_-]/g, '');
+	const height = Number(videoStream.Height) || 0;
+	const hdr = /hdr|dovi|hlg/i.test(`${videoStream.VideoRangeType || ''} ${videoStream.VideoRange || ''}`);
+	let matrix = null;
+	if (raw.includes('bt2020') || hdr) matrix = 'bt2020-ncl';
+	else if (raw.includes('bt709')) matrix = 'bt709';
+	else if (raw.includes('bt470bg')) matrix = 'bt470bg';
+	else if (raw.includes('smpte170m') || raw.includes('bt601')) matrix = 'smpte170m';
+	else if (height >= 720) matrix = 'bt709';
+	else if (height > 0) matrix = 'smpte170m';
+	if (!matrix) return null;
+	const range = String(videoStream.ColorRange || videoStream.Range || '').toLowerCase();
+	return { matrix, fullRange: /pc|full|jpeg/.test(range) };
+};
+
 export const getAssFontsUrl = (subtitleStream) => {
 	if (!subtitleStream?.isAss || !currentSession) return [];
 

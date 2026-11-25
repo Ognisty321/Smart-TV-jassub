@@ -20,42 +20,61 @@ import { subtitleCanvas, resetSubtitleCanvas, subtitleRect, on as onEngine } fro
 let ass = null
 let pgs = null
 let gen = 0
+let clock = 0
+let paused = false
+let currentFontScale = 1
+let jassubUnavailable = false
 
 export const canDrawAss = () => supportsAssRenderer()
 
 export const stop = () => {
   gen++
-  if (ass) disposeAssRenderer(ass)
-  if (pgs) disposePgsRenderer(pgs)
-  if (ass || pgs) {
-    clearAssCanvas(subtitleCanvas())
-    resetSubtitleCanvas()
-  }
+  const hadAss = ass
+  const hadPgs = pgs
   ass = null
   pgs = null
+  if (hadAss) disposeAssRenderer(hadAss)
+  if (hadPgs) disposePgsRenderer(hadPgs)
+  if (hadAss || hadPgs) clearAssCanvas(subtitleCanvas())
+  // A track still in its asynchronous start may already have captured the current canvas.
+  // Retire it even when no renderer was installed yet, so that stale start can never share or
+  // transfer the canvas a newer track is about to use.
+  resetSubtitleCanvas()
 }
 
 // Resolves true once the track draws. A newer start or a stop in between throws this one away.
 export const startAss = async (stream, fontScale, onError, compatibility = false) => {
   stop()
   const mine = gen
+  currentFontScale = fontScale
   const url = playback.getAssSubtitleUrl(stream)
   if (!url) return false
+  const useCompatibility = compatibility || jassubUnavailable
   const handleError = (err) => {
     // A transferred canvas can't be handed back, so the compatibility engine gets a fresh one
     // through a normal start. Only the still-current track may retry itself.
-    if (!compatibility && mine === gen) startAss(stream, fontScale, onError, true)
-    else if (onError) onError(err)
+    if (!useCompatibility && mine === gen) {
+      jassubUnavailable = true
+      startAss(stream, currentFontScale, onError, true).then((ok) => {
+        if (!ok && onError) onError(err)
+      }).catch((retryErr) => {
+        if (onError) onError(retryErr)
+      })
+    } else if (onError) onError(err)
   }
-  const r = await initAssCanvasRenderer(subtitleCanvas(), url, playback.getAssFontsUrl(stream), handleError, compatibility)
+  const r = await initAssCanvasRenderer(subtitleCanvas(), url, playback.getAssFontsUrl(stream), handleError, useCompatibility, playback.getVideoStorageSize(), playback.getVideoColorSpace())
   if (mine !== gen) {
     disposeAssRenderer(r)
     return false
   }
   ass = r
   if (r) {
-    setAssFontScale(r, fontScale)
+    setAssFontScale(r, currentFontScale)
     fitAss(subtitleRect())
+    // A Jassub -> Octopus retry happens after the player has already sent its time and pause
+    // state. Replay both for whichever engine survives the start.
+    setAssTime(r, clock)
+    if (r.setIsPaused) r.setIsPaused(paused, clock)
   }
   return !!r
 }
@@ -80,7 +99,6 @@ const answerFetch = (url, readable) => {
 
 // An embedded PGS track read out of the file near the playhead, so the server never has to read the whole file
 // to extract it. Drawn on the canvas at the player's clock.
-let clock = 0
 const startInBandPgs = async (canvas, stream, at) => {
   const source = createInBandPgsSource({
     streamUrl: stream.inBand.streamUrl,
@@ -156,8 +174,10 @@ export const tick = (seconds) => {
 }
 
 // Playing lets the ASS worker run its own clock between ticks, so animated lines move smoothly.
-export const setPaused = (paused, seconds) => {
-  if (ass && ass.setIsPaused) ass.setIsPaused(paused, Math.max(0, seconds))
+export const setPaused = (nextPaused, seconds) => {
+  paused = !!nextPaused
+  clock = Math.max(0, seconds)
+  if (ass && ass.setIsPaused) ass.setIsPaused(paused, clock)
 }
 
 // The ASS track's lines, for the offset strip's timeline.
@@ -167,5 +187,6 @@ export const assEvents = () => (ass ? assTimelineEvents(ass) : null)
 export const ready = (ms, keepWaiting) => (ass ? waitForAssReady(ass, ms, keepWaiting) : Promise.resolve(false))
 
 export const setFontScale = (scale) => {
+  currentFontScale = scale
   if (ass) setAssFontScale(ass, scale)
 }

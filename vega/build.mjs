@@ -49,8 +49,6 @@ const WORKER_ASSETS = [
   'subtitles-octopus-worker.wasm',
   'jassub-worker.js',
   'jassub-worker.wasm',
-  'jassub-worker-modern.wasm',
-  'jassub-default.woff2',
   'ass-fallback-font.ttf',
   'reader/libarchive-worker.js',
   'reader/wasm-gen/libarchive.wasm',
@@ -106,7 +104,10 @@ const injectScripts = (dir) => {
   const vegaDir = join(dir, 'vega')
   mkdirSync(vegaDir, { recursive: true })
   const files = readdirSync(INJECT_DIR).sort()
-  for (const file of files) copyFileSync(join(INJECT_DIR, file), join(vegaDir, file))
+  for (const file of files) {
+    if (file.endsWith('.js')) execSync(process.execPath, ['--check', join(INJECT_DIR, file)], { stdio: 'pipe' })
+    copyFileSync(join(INJECT_DIR, file), join(vegaDir, file))
+  }
   const extra = option('--inject')
   if (extra) {
     copyFileSync(extra, join(vegaDir, `test-${basename(extra)}`))

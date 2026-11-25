@@ -196,12 +196,13 @@ const videoRects = () => {
 
 // ASS and PGS lines belong to the picture, so their canvas covers it in every zoom mode (#235).
 const placeSubtitleCanvas = () => {
-  if (!subCanvas || mode !== 'video' || !contentRect) return
+  const rect = mode === 'video' ? contentRect : mode === 'avplay' ? avSubtitleRect() : null
+  if (!subCanvas || !rect) return
   const st = subCanvas.style
-  st.left = `${contentRect.x}px`
-  st.top = `${contentRect.y}px`
-  st.width = `${contentRect.w}px`
-  st.height = `${contentRect.h}px`
+  st.left = `${rect.x}px`
+  st.top = `${rect.y}px`
+  st.width = `${rect.w}px`
+  st.height = `${rect.h}px`
 }
 
 const applyVideoGeometry = () => {
@@ -442,15 +443,35 @@ const avStreamMs = (titleMs) => Math.max(0, titleMs - line.offset * 1000)
 // AVPlay shapes its letterbox from the decoded frame, so anamorphic rips come out squeezed. Fit
 // hands it a box of the shape the stream declares instead. The rect goes after the method, which
 // is what makes the scaler pick up a change mid playback.
+const avSubtitleRect = () => {
+  const sw = AVPLAY_SCREEN.width
+  const sh = AVPLAY_SCREEN.height
+  if (!zoom.aspect || zoom.mode === 'stretch') return { x: 0, y: 0, w: sw, h: sh }
+  const target = zoom.aspect
+  const wFull = Math.round(sh * target)
+  const hFull = Math.round(sw / target)
+  const wide = target >= sw / sh
+  if (zoom.mode === 'fill') {
+    return wide
+      ? { x: -Math.round((wFull - sw) / 2), y: 0, w: wFull, h: sh }
+      : { x: 0, y: -Math.round((hFull - sh) / 2), w: sw, h: hFull }
+  }
+  return wide
+    ? { x: 0, y: Math.round((sh - hFull) / 2), w: sw, h: hFull }
+    : { x: Math.round((sw - wFull) / 2), y: 0, w: wFull, h: sh }
+}
+
 const applyAvDisplay = () => {
   if (!tz) return
   if (zoom.mode === 'fit' && zoom.aspect) {
     tz.avplaySetDisplayMethod('PLAYER_DISPLAY_MODE_FULL_SCREEN')
     tz.setDisplayWindow(getZoomDisplayRect(AVPLAY_SCREEN, zoom.aspect, 'fit'))
-    return
+  } else {
+    tz.avplaySetDisplayMethod(zoom.mode === 'stretch' ? 'PLAYER_DISPLAY_MODE_FULL_SCREEN' : zoom.mode === 'fill' ? 'PLAYER_DISPLAY_MODE_CROPPED_FULL' : 'PLAYER_DISPLAY_MODE_LETTER_BOX')
+    tz.setDisplayWindow({ x: 0, y: 0, width: 1920, height: 1080 })
   }
-  tz.avplaySetDisplayMethod(zoom.mode === 'stretch' ? 'PLAYER_DISPLAY_MODE_FULL_SCREEN' : zoom.mode === 'fill' ? 'PLAYER_DISPLAY_MODE_CROPPED_FULL' : 'PLAYER_DISPLAY_MODE_LETTER_BOX')
-  tz.setDisplayWindow({ x: 0, y: 0, width: 1920, height: 1080 })
+  placeSubtitleCanvas()
+  emit('geometry', subtitleRect())
 }
 
 // An embedded track picked by its stream index. Text arrives through onsubtitlechange and draws
@@ -886,8 +907,8 @@ export const liveRange = () => {
 // The web player's dropped frame count, null where there is none.
 export const droppedFrames = () =>
   mode === 'video' && video && typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality().droppedVideoFrames : null
-// The picture's box on the page, which the ASS renderer sizes itself to. Null on Tizen.
-export const subtitleRect = () => (mode === 'video' ? contentRect : null)
+// The picture's box on the page, which the ASS renderer sizes itself to. Null only before playback.
+export const subtitleRect = () => (mode === 'video' ? contentRect : mode === 'avplay' ? avSubtitleRect() : null)
 
 // Seeks in title time. A Silo stream that can't reach the spot itself asks the player to have Silo
 // reopen it there ('serverSeek').

@@ -55,5 +55,7 @@ ua('Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gec
 assert.equal(supportsJassubRenderer(), false, 'Tizen 6 stays on the compatibility engine')
 ua('Mozilla/5.0 (SMART-TV; Linux; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/5.0 Chrome/85.0.4183.93 TV Safari/537.36')
 assert.equal(supportsJassubRenderer(), true, 'Samsung Browser keeps its Chrome token')
+ua('Mozilla/5.0 (Fire TV; Vega OS) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36')
+assert.equal(supportsJassubRenderer(), true, 'an unknown but capable embedded engine is not excluded')
 
 console.log('subtitle engine files ok')

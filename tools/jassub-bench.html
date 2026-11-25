@@ -15,6 +15,8 @@ const frames = Number(q.get('frames') || 40)
 const renderScale = Number(q.get('renderScale') || 1)
 const adaptive = q.get('adaptive') === '1'
 const normalWasm = q.get('normalWasm') === '1'
+const storageW = Number(q.get('storageW') || 0)
+const storageH = Number(q.get('storageH') || 0)
 const keep = q.get('keep') === '1'
 
 window.__errors = []
@@ -43,6 +45,10 @@ const scenarios = {
   static: [
     dialogue('Plain dialogue line for a baseline'),
     dialogue('{\\pos(960,80)}Simple positioned sign', 'Sign', 1),
+  ],
+  unicode: [
+    dialogue('Symbols ♪ ♥ ★ → and Arabic مرحبا بالعالم'),
+    dialogue('Hebrew שלום עולם and Thai สวัสดีชาวโลก'),
   ],
   karaoke: [
     dialogue(Array.from({ length: 70 }, (_, i) => syllable(i)).join('')),
@@ -104,7 +110,7 @@ const start = async () => {
   const url = assUrl ||= URL.createObjectURL(new Blob([ass], { type: 'text/plain' }))
   const validate = WebAssembly.validate
   if (normalWasm) WebAssembly.validate = () => false
-  const renderer = await initAssCanvasRenderer(canvas, url, [], (error) => window.__errors.push(`engine:${error?.message || error}`))
+  const renderer = await initAssCanvasRenderer(canvas, url, [], (error) => window.__errors.push(`engine:${error?.message || error}`), false, storageW && storageH ? { width: storageW, height: storageH } : null)
   WebAssembly.validate = validate
   if (!renderer) throw new Error('no renderer')
   window.__renderer = renderer
@@ -146,7 +152,7 @@ const benchOctopus = async (renderer) => {
   await sleep(700)
   renderer.setIsPaused(true, 1.5)
   if (!keep) disposeAssRenderer(renderer)
-  return { scenario, width, height, engine: 'octopus', capture, drawDebug, afterEnd, seekBack, resized, playback: { errors: window.__errors.length }, errors: window.__errors }
+  return { scenario, width, height, engine: 'octopus', capture, drawDebug: null, afterEnd, seekBack, resized, playback: { errors: window.__errors.length }, errors: window.__errors }
 }
 
 const bench = async () => {

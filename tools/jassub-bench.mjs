@@ -17,6 +17,8 @@ const scenarios = selected ? selected.split(',') : ['static', 'karaoke', 'blur',
 const renderScale = arg('renderScale', '1')
 const adaptive = arg('adaptive', '0')
 const normalWasm = arg('normalWasm', '0')
+const storageW = arg('storageW', '')
+const storageH = arg('storageH', '')
 const keep = arg('keep', '0')
 const page = arg('page', 'jassub-bench.html')
 const shots = arg('shots', '')
@@ -28,7 +30,33 @@ const port = 5174 + Math.floor(Math.random() * 100)
 const debugPort = 9300 + Math.floor(Math.random() * 200)
 const profile = mkdtempSync(join(tmpdir(), 'jassub-bench-chrome-'))
 
-const server = await createServer({ logLevel: 'silent', server: { host: '127.0.0.1', port } })
+const lifecyclePlaybackMock = {
+  name: 'moonfin:lifecycle-playback-mock',
+  enforce: 'pre',
+  resolveId(id, importer) {
+    if (importer?.endsWith('bitmapSubs.js') && id === '../../services/playback.js') return '\0lifecycle-playback'
+  },
+  load(id) {
+    if (id !== '\0lifecycle-playback') return
+    return `export const getAssSubtitleUrl = (stream) => stream.url
+export const getAssFontsUrl = () => []
+export const getVideoStorageSize = () => ({ width: 1920, height: 1080 })
+export const getVideoColorSpace = () => null
+`
+  },
+  configureServer(server) {
+    server.middlewares.use((req, res, next) => {
+      if (!process.env.CORRUPT_JASSUB || !req.url?.startsWith('/jassub-worker.js')) return next()
+      res.setHeader('Content-Type', 'text/html')
+      res.end('<html>not a worker</html>')
+    })
+  },
+}
+const server = await createServer({
+  logLevel: 'silent',
+  server: { host: '127.0.0.1', port },
+  plugins: page === 'bitmapSubs-lifecycle.html' ? [lifecyclePlaybackMock] : [],
+})
 await server.listen()
 const chromeArgs = [
   '--headless=new', '--no-sandbox', '--mute-audio', `--remote-debugging-port=${debugPort}`,
@@ -88,7 +116,7 @@ try {
   for (const [width, height] of sizes) {
     for (const scenario of scenarios) {
       consoleEvents.length = 0
-      const url = `http://127.0.0.1:${port}/tools/${page}?scenario=${scenario}&width=${width}&height=${height}&frames=${frames}&renderScale=${renderScale}&adaptive=${adaptive}&normalWasm=${normalWasm}&keep=${keep}`
+      const url = `http://127.0.0.1:${port}/tools/${page}?scenario=${scenario}&width=${width}&height=${height}&frames=${frames}&renderScale=${renderScale}&adaptive=${adaptive}&normalWasm=${normalWasm}&storageW=${storageW}&storageH=${storageH}&keep=${keep}`
       await send('Page.navigate', { url })
       for (let i = 0; i < 100; i++) {
         const phase = await send('Runtime.evaluate', { expression: 'window.__phase', returnByValue: true }).catch(() => null)
@@ -97,7 +125,7 @@ try {
       }
       let done = false
       const evaluationPromise = send('Runtime.evaluate', {
-        expression: 'window.__runBench()',
+        expression: page === 'bitmapSubs-lifecycle.html' ? 'window.__runLifecycle()' : 'window.__runBench()',
         awaitPromise: true,
         returnByValue: true,
         timeout: 120000,

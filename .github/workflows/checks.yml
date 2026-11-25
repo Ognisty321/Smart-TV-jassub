@@ -100,6 +100,7 @@ jobs:
       - name: Check the Vega and Xbox build helpers
         run: |
           node vega/package-files.check.mjs
+          node vega/worker-shim.check.mjs
           node xbox/probe.check.mjs
 
       # The counts and failing check names, for the PR comment. Each check file

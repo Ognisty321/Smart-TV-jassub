@@ -16,9 +16,7 @@ const ASSETS = [
   octopus('subtitles-octopus-worker-legacy.js'),
   octopus('subtitles-octopus-worker.wasm'),
   jassub('wasm/jassub-worker.wasm'),
-  jassub('wasm/jassub-worker-modern.wasm'),
-  [mod('jassub', 'dist', 'default.woff2'), 'jassub-default.woff2'],
-  [join(root, 'public', 'fonts', 'Roboto-Regular.ttf'), 'ass-fallback-font.ttf'],
+  [join(root, 'public', 'fonts', 'NotoSansUnicodeFallback.ttf'), 'ass-fallback-font.ttf'],
 ]
 
 // Jassub creates a module worker. TV apps load from file:// and their older engines only run
@@ -74,8 +72,27 @@ const patchJassubWorker = () => ({
         '    }',
         '',
       ].join('\n')
+      const verifyHook = [
+        '    _drawVerify(time, repaint = false) {',
+        '      this._lastDrawTime = time;',
+        '      const view = this._wasm.rawRender(time, Number(repaint));',
+        '      if (!view) return { images: 0, alpha: 0 };',
+        '      const images = readImages(view);',
+        '      this._gpurender.render(images, self.HEAPU8RAW);',
+        '      const canvas = this._gpurender.canvas;',
+        '      const surface = canvas && new OffscreenCanvas(canvas.width, canvas.height);',
+        '      const ctx = surface && surface.getContext("2d");',
+        '      if (!ctx) return { images: images.length, alpha: -1 };',
+        '      ctx.drawImage(canvas, 0, 0);',
+        '      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;',
+        '      let alpha = 0;',
+        '      for (let i = 3; i < data.length; i += 16) if (data[i]) alpha++;',
+        '      return { images: images.length, alpha };',
+        '    }',
+        '',
+      ].join('\n')
       if (!code.includes('  _setColorSpace(matrix, fullRange)')) throw new Error('jassub worker methods changed, update scripts/subtitle-assets.mjs')
-      return { code: code.replace(GLUE_IMPORT, 'await self.jassubLoadWasmGlue(data.wasmWorkerUrl)').replace('  _setColorSpace(matrix, fullRange)', `${debugHook}  _setColorSpace(matrix, fullRange)`), map: null }
+      return { code: code.replace(GLUE_IMPORT, 'await self.jassubLoadWasmGlue(data.wasmWorkerUrl)').replace('  _setColorSpace(matrix, fullRange)', `${debugHook}${verifyHook}  _setColorSpace(matrix, fullRange)`), map: null }
     }
     if (/\/jassub\/dist\/wasm\/jassub-worker(-modern)?\.js$/.test(path)) {
       return { code: code.replace(META_URL, 'self.location.href').replace(MODULE_PTHREAD, ''), map: null }
@@ -109,6 +126,10 @@ await build({
   },
 })
 
+const bundledWorker = readFileSync(join(outDir, 'jassub-worker.js'), 'utf8')
+const streamingCall = 'WebAssembly.instantiateStreaming(fetch(self.location.href),e).then'
+if (!bundledWorker.includes(streamingCall)) throw new Error('jassub WASM instantiation changed, update scripts/subtitle-assets.mjs')
+writeFileSync(join(outDir, 'jassub-worker.js'), bundledWorker.replaceAll(streamingCall, 'self.jassubInstantiate(e).then'))
 copyFileSync(join(outDir, 'jassub-worker.js'), join(root, 'public', 'jassub-worker.js'))
 for (const [src, name] of ASSETS) copyFileSync(src, join(root, 'public', name))
 console.log(`[subtitle-assets] copied ${ASSETS.length + 1} files to public/`)

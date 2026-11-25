@@ -1466,6 +1466,7 @@ export default function Player(props) {
     if (s.panel === 'subOffset') {
       my.subDelay = seconds
       updateCue(my.pos)
+      bitmapSubs.tick(my.pos - my.subDelay)
     } else setSecondaryDelay(seconds)
     s.offsetShown = s.panel === 'subOffset' ? my.subDelay : my.secDelay
     updateOffsetTimeline()
@@ -1615,7 +1616,7 @@ export default function Player(props) {
         if (my.subIndex === index) loadCues(stream, true)
       }
       if (await trackFetch(bitmapSubs.startAss(stream, getAssFontScale(subStyle()), onError))) {
-        bitmapSubs.setPaused(engine.isPaused(), my.pos)
+        bitmapSubs.setPaused(engine.isPaused(), my.pos - my.subDelay)
         bitmapSubs.tick(my.pos - my.subDelay)
         // The worker reads the whole track and its fonts, which takes a while on a slow TV.
         trackFetch(bitmapSubs.ready(ASS_FETCH_INDICATOR_LIMIT, () => my.subIndex === index))
@@ -2553,7 +2554,7 @@ export default function Player(props) {
       my.recovery.setPaused(false)
       my.recovery.update({ playing: true, buffering: false })
       my.reconnect.playing()
-      bitmapSubs.setPaused(false, my.pos)
+      bitmapSubs.setPaused(false, my.pos - my.subDelay)
       channelPlaying()
       engine.setMediaPlaybackState(false)
       // On webOS 3 the video wants the memory, so the pictures of the pages hidden under the player are freed
@@ -2578,7 +2579,7 @@ export default function Player(props) {
       if (s.pauseInfo && !my.held && s.osd && s.panel === 'none') hideOsd()
       my.recovery.setPaused(true)
       my.reconnect.interrupted()
-      bitmapSubs.setPaused(true, my.pos)
+      bitmapSubs.setPaused(true, my.pos - my.subDelay)
       engine.setMediaPlaybackState(true)
       if (my.startReported && !my.stopped) playback.reportProgress(posTicks(), { isPaused: true, eventName: 'pause' })
     }),
@@ -2613,6 +2614,7 @@ export default function Player(props) {
     engine.on('buffering', (b) => {
       s.buffering = b
       my.recovery.update({ buffering: b })
+      bitmapSubs.setPaused(b || s.paused, my.pos - my.subDelay)
       if (b) my.reconnect.interrupted()
     }),
     engine.on('ended', () => onEnded()),

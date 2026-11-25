@@ -1,0 +1,52 @@
+<!doctype html><meta charset="utf-8"><base href="/"><script type="module">
+import * as bitmapSubs from '../src/pages/Player/bitmapSubs.js'
+
+window.__phase = 'loaded'
+window.__runLifecycle = async () => {
+  const errors = []
+  const unhandled = []
+  window.addEventListener('error', (event) => unhandled.push(String(event.message)))
+  window.addEventListener('unhandledrejection', (event) => unhandled.push(String(event.reason && event.reason.message || event.reason)))
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  const onError = (err) => errors.push(String(err && err.message || err))
+  const a = { isAss: true, url: '/tools/bitmap-a.ass' }
+  const b = { isAss: true, url: '/tools/bitmap-b.ass' }
+  const result = {}
+  try {
+    result.firstStart = await bitmapSubs.startAss(a, 1, onError)
+    bitmapSubs.setPaused(false, 1.5)
+    bitmapSubs.tick(1.5)
+    await sleep(500)
+    bitmapSubs.stop()
+    bitmapSubs.stop()
+    result.secondStart = await bitmapSubs.startAss(b, 1, onError)
+    result.secondEvents = (bitmapSubs.assEvents() || []).map((event) => event.Text).join('|')
+    bitmapSubs.stop()
+
+    const first = bitmapSubs.startAss(a, 1, onError)
+    await sleep(20)
+    const second = bitmapSubs.startAss(b, 1, onError)
+    result.rapidResults = await Promise.all([first, second])
+    await sleep(700)
+    result.rapidEvents = (bitmapSubs.assEvents() || []).map((event) => event.Text).join('|')
+
+    result.cycles = []
+    for (let i = 0; i < 5; i++) {
+      result.cycles.push(await bitmapSubs.startAss(i % 2 ? a : b, 1, onError))
+      bitmapSubs.stop()
+    }
+    result.errors = errors
+    result.unhandled = unhandled
+    result.pass = result.firstStart === true && result.secondStart === true &&
+      result.secondEvents.includes('track B') && result.rapidEvents.includes('track B') &&
+      result.cycles.every(Boolean) && errors.length === 0 && unhandled.length === 0
+  } catch (err) {
+    result.pass = false
+    result.exception = String(err && err.stack || err)
+    result.errors = errors
+    result.unhandled = unhandled
+  }
+  bitmapSubs.stop()
+  return result
+}
+</script>

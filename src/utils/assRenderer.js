@@ -27,19 +27,26 @@ const supportsOctopusRenderer = () => {
 };
 
 // Jassub's own floor is Chrome 85. The API checks keep embedded or future Chromium-like engines
-// honest; the version check keeps older TV browsers on the compatibility engine instead of letting
-// one transfer the canvas before its WASM turns out not to compile.
+// honest; a known Chrome/Tizen version below the floor stays on the compatibility engine, while an
+// unknown embedded engine may still prove itself through the API checks and has a runtime fallback.
 export const supportsJassubRenderer = () => {
 	const chromiumMajor = getChromiumMajorVersion();
 	if (chromiumMajor && chromiumMajor < 85) return false;
-	if (!chromiumMajor) return false;
 	if (typeof Worker !== 'function') return false;
 	if (typeof WebAssembly !== 'object') return false;
 	if (typeof Proxy !== 'function') return false;
 	if (typeof ResizeObserver !== 'function') return false;
 	if (typeof TextDecoder !== 'function') return false;
 	if (typeof HTMLCanvasElement === 'undefined') return false;
-	return typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function';
+	if (typeof HTMLCanvasElement.prototype.transferControlToOffscreen !== 'function') return false;
+	if (typeof Atomics !== 'object') return false;
+	try {
+		// Both Jassub WASM builds are compiled for shared memory even when they use one thread.
+		new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+	} catch (err) {
+		return false;
+	}
+	return true;
 };
 
 export const supportsAssRenderer = () => supportsJassubRenderer() || supportsOctopusRenderer();
@@ -56,8 +63,12 @@ const WASM = 'subtitles-octopus-worker.wasm';
 const FALLBACK_FONT = 'ass-fallback-font.ttf';
 const JASSUB_WORKER = 'jassub-worker.js';
 const JASSUB_WASM = 'jassub-worker.wasm';
-const JASSUB_MODERN_WASM = 'jassub-worker-modern.wasm';
+// One merged Noto fallback covers Latin/Cyrillic/Greek plus Arabic, Hebrew, Thai and the
+// symbols common in song/typeset lines. A single family is required because libass does not
+// cascade across separately registered browser-side fonts when a glyph is missing.
 const fullUrl = (path) => new URL(assetUrl(path), document.baseURI).href;
+const fallbackFontUrls = () => [fullUrl(FALLBACK_FONT)];
+const fallbackFontMap = () => ({ roboto: fullUrl(FALLBACK_FONT), 'noto sans': fullUrl(FALLBACK_FONT) });
 
 // The octopus engine's files as the worker gets them. When an in-app update replaced any of them,
 // the worker starts from a short script that names each file, since a worker started from a blob URL
@@ -83,9 +94,11 @@ const jassubEngine = () => {
 	return {
 		workerUrl: worker,
 		wasmUrl: fullUrl(JASSUB_WASM),
-		modernWasmUrl: fullUrl(JASSUB_MODERN_WASM),
+		// The mimalloc build is only a few percent faster but uses about twice the WASM heap in
+		// typesetting-heavy tracks. TVs are memory constrained, so every engine gets emmalloc.
+		modernWasmUrl: fullUrl(JASSUB_WASM),
 		wasmWorkerUrl: `${worker}#normal`,
-		modernWasmWorkerUrl: `${worker}#modern`,
+		modernWasmWorkerUrl: `${worker}#normal`,
 	};
 };
 
@@ -99,6 +112,7 @@ const createOctopusRenderer = async (options, onError) => {
 
 		return new SubtitlesOctopus({
 			...options,
+			fonts: [...new Set([...(options.fonts || []), ...fallbackFontUrls()])],
 			...engine(),
 			onError: onError || null,
 			...qualityOptions,
@@ -113,14 +127,17 @@ const createOctopusRenderer = async (options, onError) => {
 // Heavy typesetting is rasterized in one worker thread. These steps trade sharpness for frame time
 // only after several slow frames, then recover after a sustained quiet period.
 const JASSUB_QUALITY_LEVELS = [1, 0.8, 0.65, 0.5];
-const JASSUB_SLOW_FRAME_MS = 34;
-const JASSUB_FAST_FRAME_MS = 12;
+const JASSUB_FRAME_INTERVAL_MS = 1000 / 24;
+const JASSUB_SLOW_FRAME_MS = JASSUB_FRAME_INTERVAL_MS * 0.8;
+const JASSUB_FAST_FRAME_MS = JASSUB_FRAME_INTERVAL_MS * 0.3;
+const JASSUB_VERY_SLOW_FRAME_MS = 100;
+const JASSUB_CRITICAL_FRAME_MS = 250;
 
 // Jassub has no clock of its own in canvas-only use. This facade follows the same contract as
 // SubtitlesOctopus: ticks are absolute corrections, while playing time advances between them so
 // animated typesetting keeps moving. Most frames come back unchanged from libass and cost little.
 class JassubCanvasRenderer {
-	constructor(instance, onError) {
+	constructor(instance, onError, storageSize = null, colorSpace = null) {
 		this.instance = instance;
 		this.ready = instance.ready;
 		this.width = instance._canvas.width || 1920;
@@ -142,19 +159,50 @@ class JassubCanvasRenderer {
 		this.timer = null;
 		this.failed = false;
 		this.destroyed = false;
+		this.storageWidth = storageSize?.width || 0;
+		this.storageHeight = storageSize?.height || 0;
 		this.qualityLevel = 0;
 		this.frameCosts = [];
-		this.fastFrames = 0;
+		this.fastDraws = 0;
 		this.qualityChangedAt = 0;
+		this.renderBusy = false;
+		this.renderSkipped = false;
+		this.renderSamples = [];
+		this.warmupDraws = 2;
+		this.renderVerified = false;
 		this.resizeWrite = Promise.resolve();
 		this.trackWrite = Promise.resolve();
 		this.onError = onError;
-		instance.ready.catch((err) => this.fail(err));
+		this.readySettled = false;
+		if (colorSpace?.matrix) {
+			instance.ready.then(() => {
+				if (!this.destroyed && !this.failed) return instance.renderer._setColorSpace(colorSpace.matrix, !!colorSpace.fullRange);
+			}).catch((err) => this.fail(err));
+		}
+		this.readyTimeout = setTimeout(() => {
+			if (!this.readySettled) this.fail(new Error('Jassub worker did not become ready'));
+		}, 8000);
+		this.workerError = (event) => {
+			this.fail(new Error(event.message || 'Jassub worker stopped'));
+		};
+		if (instance._worker) {
+			instance._worker.addEventListener('error', this.workerError);
+			instance._worker.addEventListener('messageerror', this.workerError);
+		}
+		instance.ready.then(() => {
+			this.readySettled = true;
+			clearTimeout(this.readyTimeout);
+		}, (err) => {
+			this.readySettled = true;
+			clearTimeout(this.readyTimeout);
+			this.fail(err);
+		});
 	}
 
 	fail(err) {
 		if (this.failed || this.destroyed) return;
 		this.failed = true;
+		this.stopClock();
 		console.error('[AssRenderer] Jassub failed:', err);
 		if (this.onError) this.onError(err);
 	}
@@ -170,42 +218,89 @@ class JassubCanvasRenderer {
 	}
 
 	render(repaint = false) {
-		if (this.destroyed || this.failed) return Promise.resolve();
+		if (this.destroyed || this.failed) return Promise.resolve(false);
+		if (this.renderBusy) {
+			this.renderSkipped = true;
+			this.noteRenderSample(true);
+			return Promise.resolve(false);
+		}
+		this.renderBusy = true;
+		this.noteRenderSample(false);
+		const started = performance.now() || Date.now();
 		return this.instance.ready.then(() => {
 			if (this.destroyed || this.failed) return;
-			const started = performance.now() || Date.now();
-			return this.instance.manualRender({
-				expectedDisplayTime: started,
-				width: Math.max(1, this.width),
-				height: Math.max(1, this.height),
-				mediaTime: this.now(),
-			}, repaint).then(() => this.adaptQuality((performance.now() || Date.now()) - started));
-		}).catch((err) => this.fail(err));
+			if (this.renderVerified) return this.instance.renderer._draw(this.now(), repaint);
+			return this.instance.renderer._drawVerify(this.now(), repaint).then((result) => {
+				// No images is a legitimate gap or an unchanged frame. Once libass does emit images,
+				// at least one pixel must survive the GPU canvas path; alpha -1 means this browser
+				// cannot read the canvas back, so that browser simply stays unverified.
+				if (result && result.images > 0) {
+					if (result.alpha === 0) throw new Error('Jassub rendered no pixels');
+					if (result.alpha > 0) this.renderVerified = true;
+				}
+			});
+		}).then(() => {
+			this.adaptQuality((performance.now() || Date.now()) - started);
+		}).catch((err) => this.fail(err)).finally(() => {
+			this.renderBusy = false;
+			if (this.renderSkipped) {
+				this.renderSkipped = false;
+				this.render(false);
+			}
+		});
+	}
+
+	noteRenderSample(skipped) {
+		const now = performance.now() || Date.now();
+		this.renderSamples.push({ at: now, skipped });
+		while (this.renderSamples.length && now - this.renderSamples[0].at > 1000) this.renderSamples.shift();
+		if (this.renderSamples.length >= 4 && this.renderSamples.filter((sample) => sample.skipped).length / this.renderSamples.length >= 0.5) {
+			this.degradeQuality(now);
+		}
+	}
+
+	degradeQuality(now, lowest = false) {
+		if ((lowest || this.qualityLevel < JASSUB_QUALITY_LEVELS.length - 1) && now - this.qualityChangedAt > 300) {
+			this.qualityLevel = lowest ? JASSUB_QUALITY_LEVELS.length - 1 : this.qualityLevel + 1;
+			this.frameCosts = [];
+			this.fastDraws = 0;
+			this.renderSamples = [];
+			this.qualityChangedAt = now;
+			this.resize();
+		}
 	}
 
 	adaptQuality(cost) {
 		if (this.destroyed || this.failed) return;
 		const now = performance.now() || Date.now();
-		// Unchanged frames return almost immediately. Judge load only by frames which did
-		// enough work to prove libass actually rasterized or composited them; otherwise a
-		// heavy track which changes every other video frame looks half cheap and half slow.
+		// The first draws after a track load include cold font/glyph caches. Sustained overload is
+		// still caught by skipped renders, but those one-off cache misses must not lower sharpness.
+		if (this.warmupDraws > 0) {
+			this.warmupDraws -= 1;
+			return;
+		}
+		if (cost >= JASSUB_CRITICAL_FRAME_MS) {
+			this.degradeQuality(now, true);
+			return;
+		}
+		if (cost >= JASSUB_VERY_SLOW_FRAME_MS) {
+			this.degradeQuality(now);
+			return;
+		}
 		if (cost >= 10) {
 			this.frameCosts.push(cost);
 			if (this.frameCosts.length > 5) this.frameCosts.shift();
 		}
-		if (cost <= JASSUB_FAST_FRAME_MS) this.fastFrames += 1;
-		else this.fastFrames = 0;
+		if (cost <= JASSUB_FAST_FRAME_MS) this.fastDraws += 1;
+		else this.fastDraws = 0;
 		const slowFrames = this.frameCosts.filter((frameCost) => frameCost >= JASSUB_SLOW_FRAME_MS).length;
-		if (this.frameCosts.length >= 3 && slowFrames >= 3 && this.qualityLevel < JASSUB_QUALITY_LEVELS.length - 1 && now - this.qualityChangedAt > 300) {
-			this.qualityLevel += 1;
-			this.frameCosts = [];
-			this.fastFrames = 0;
-			this.qualityChangedAt = now;
-			this.resize();
-		} else if (this.fastFrames >= 96 && this.qualityLevel > 0 && now - this.qualityChangedAt > 4000) {
+		if (this.frameCosts.length >= 3 && slowFrames >= 3) {
+			this.degradeQuality(now);
+		} else if (this.fastDraws >= 72 && this.qualityLevel > 0 && now - this.qualityChangedAt > 4000) {
 			this.qualityLevel -= 1;
 			this.frameCosts = [];
-			this.fastFrames = 0;
+			this.fastDraws = 0;
+			this.renderSamples = [];
 			this.qualityChangedAt = now;
 			this.resize();
 		}
@@ -221,7 +316,7 @@ class JassubCanvasRenderer {
 
 	startClock() {
 		if (this.timer || this.destroyed) return;
-		this.timer = setInterval(() => this.render(false), 1000 / 24);
+		this.timer = setInterval(() => this.render(false), JASSUB_FRAME_INTERVAL_MS);
 	}
 
 	stopClock() {
@@ -240,7 +335,7 @@ class JassubCanvasRenderer {
 			.then(() => {
 				if (!this.destroyed) {
 					const size = this.renderSize();
-					return this.instance.renderer._resizeCanvas(size.width, size.height, 0, 0);
+					return this.instance.renderer._resizeCanvas(size.width, size.height, this.storageWidth, this.storageHeight);
 				}
 			})
 			.then(() => {
@@ -251,6 +346,7 @@ class JassubCanvasRenderer {
 	}
 
 	setTrack(content) {
+		this.warmupDraws = 2;
 		this.trackWrite = this.trackWrite
 			.then(() => this.instance.ready)
 			.then(() => this.instance.renderer.setTrack(content))
@@ -261,6 +357,7 @@ class JassubCanvasRenderer {
 
 	setCurrentTime(seconds) {
 		this.time = Math.max(0, seconds || 0);
+		if (!this.paused && Math.abs(this.time - this.now()) < 0.08) return;
 		this.anchor(this.time);
 		this.render(false);
 	}
@@ -277,42 +374,53 @@ class JassubCanvasRenderer {
 		if (this.destroyed) return;
 		this.destroyed = true;
 		this.stopClock();
+		clearTimeout(this.readyTimeout);
+		if (this.instance._worker) {
+			this.instance._worker.removeEventListener('error', this.workerError);
+			this.instance._worker.removeEventListener('messageerror', this.workerError);
+			// JASSUB.destroy() awaits ready before terminating. A worker that never started would
+			// otherwise leak forever, so the facade owns termination for both healthy and bad workers.
+			this.instance._worker.terminate();
+			return;
+		}
 		this.instance.destroy().catch(() => {});
 	}
 }
 
-const createJassubRenderer = async (options, onError) => {
+const createJassubRenderer = async (options, onError, storageSize, colorSpace) => {
 	try {
 		const mod = await import('jassub');
 		const JASSUB = mod.default || mod;
-		const fallback = fullUrl(FALLBACK_FONT);
 		const instance = new JASSUB({
 			...options,
 			...jassubEngine(),
 			// availableFonts only says where a font can be fetched after libass first misses it.
-			// Put the fallback in fonts too, so the first frame already has glyphs instead of
+			// Put the fallbacks in fonts too, so the first frame already has glyphs instead of
 			// rendering empty until a later animated frame happens to force a repaint.
-			fonts: [...(options.fonts || []), fallback],
-			availableFonts: {roboto: fallback},
-			defaultFont: 'roboto',
+			fonts: [...new Set([...(options.fonts || []), ...fallbackFontUrls()])],
+			availableFonts: fallbackFontMap(),
+			defaultFont: 'noto sans',
 			queryFonts: false,
 			// TV browsers rarely expose deviceMemory. Use upstream's low-memory tier: in the
-			// extreme typesetting harness it capped WASM heap growth near 135 MB instead of 203 MB,
+			// extreme typesetting harness it keeps the emmalloc WASM heap near 67 MB instead of about 135 MB,
 			// while producing the same pixels and broadly unchanged render times.
 			libassMemoryLimit: 32,
 			libassGlyphLimit: 1000,
 			debug: false
 		});
-		return new JassubCanvasRenderer(instance, onError);
+		// The facade handles this same rejection, but it is attached after constructor setup. Mark it
+		// handled here too so a worker that cannot even parse does not become an unhandled rejection.
+		instance.ready.catch(() => {});
+		return new JassubCanvasRenderer(instance, onError, storageSize, colorSpace);
 	} catch (err) {
 		console.error('[AssRenderer] Failed to initialize Jassub:', err);
 		return null;
 	}
 };
 
-const createRenderer = async (options, onError, compatibility = false) => {
+const createRenderer = async (options, onError, compatibility = false, storageSize = null, colorSpace = null) => {
 	if (supportsJassubRenderer() && !compatibility) {
-		const renderer = await createJassubRenderer(options, onError);
+		const renderer = await createJassubRenderer(options, onError, storageSize, colorSpace);
 		if (renderer) return renderer;
 	}
 	return createOctopusRenderer(options, onError);
@@ -363,7 +471,7 @@ const fetchScript = async (url) => {
 	}
 };
 
-export const initAssCanvasRenderer = async (canvasElement, subtitleUrl, fontsUrl, onError, compatibility = false) => {
+export const initAssCanvasRenderer = async (canvasElement, subtitleUrl, fontsUrl, onError, compatibility = false, storageSize = null, colorSpace = null) => {
 	if (!canvasElement || !subtitleUrl) return null;
 	canvasElement.width = window.innerWidth || canvasElement.clientWidth || 1920;
 	canvasElement.height = window.innerHeight || canvasElement.clientHeight || 1080;
@@ -374,7 +482,7 @@ export const initAssCanvasRenderer = async (canvasElement, subtitleUrl, fontsUrl
 	const options = script === null
 		? {canvas: canvasElement, subUrl: subtitleUrl, fonts: fontsUrl}
 		: {canvas: canvasElement, subContent: scaleAssFontSizes(script, scale), fonts: fontsUrl};
-	const renderer = await createRenderer(options, onError, compatibility);
+	const renderer = await createRenderer(options, onError, compatibility, storageSize, colorSpace);
 	if (renderer && script !== null) {
 		tracks.set(renderer, {script, scale});
 		// The size may have changed while the renderer was starting.
@@ -409,6 +517,10 @@ export const setAssTime = (renderer, currentTimeSeconds) => {
 
 export const clearAssCanvas = (canvas) => {
 	if (!canvas) return;
-	const ctx = canvas.getContext('2d');
-	if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+	try {
+		const ctx = canvas.getContext('2d');
+		if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+	} catch (err) {
+		// Jassub transfers control of its canvas to the worker. That canvas is retired, not cleared.
+	}
 };

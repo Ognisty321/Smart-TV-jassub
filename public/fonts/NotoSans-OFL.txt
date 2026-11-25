@@ -1,5 +1,5 @@
 Noto Sans: Copyright 2015 Google LLC. All Rights Reserved.
-The NotoSans-Regular.woff here is a subset of Noto Sans 2.004, cut to the characters Roboto covers.
+NotoSans-Regular.ttf is the Latin UI font. NotoSansUnicodeFallback.ttf merges Noto Sans with Noto Sans Symbols, Noto Sans Symbols 2, Noto Sans Arabic, Noto Sans Hebrew and Noto Sans Thai for subtitle fallback coverage.
 
 SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
 -----------------------------------------------------------

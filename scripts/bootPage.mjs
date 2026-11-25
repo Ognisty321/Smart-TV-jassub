@@ -4,9 +4,9 @@
 // the chosen bundle's tags are written in by a classic script instead.
 
 // The modern bundle targets chrome98, and the newest syntax that leaves in it is a class static
-// block (Chrome 94, Tizen 7 and webOS 23). An engine without it stops at a SyntaxError here, ahead
-// of the error log below, so the flag stays unset.
-export const MODERN_PROBE = '<script>(class{static{window.__moonfinModern=1}})</script>'
+// block (Chrome 94, Tizen 7 and webOS 23). The syntax is inside eval so an older engine merely
+// leaves the flag unset instead of adding an uncaught parse error ahead of the error log below.
+export const MODERN_PROBE = '<script>try{eval(\'(class{static{window.__moonfinModern=1}})\')}catch(e){}</script>'
 
 // The earlier Moonfin TV app's in-app updates kept a downloaded release in IndexedDB, up to 16.5 MB
 // of webOS's 21 MB. This package never boots it, so the stored copy and its keys go. The update
