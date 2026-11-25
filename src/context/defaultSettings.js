@@ -53,6 +53,9 @@ export const defaultSettings = {
 	preferSdhSubtitles: false,
 	preferTextSubtitles: false,
 	preferExternalSubtitles: false,
+	// Samsung's AVPlay position precedes the processed picture on some sets. This device-local
+	// compensation holds app-drawn subtitles back by the configured milliseconds.
+	avplaySubtitleLatencyMs: 0,
 	// The second subtitle track's settings stay on this device. A size of 0 and an empty
 	// color follow the first track.
 	secondarySubtitlesEnabled: false,

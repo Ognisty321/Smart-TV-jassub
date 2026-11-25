@@ -96,6 +96,7 @@ import {
   secondarySelection,
   stepSecondarySetting,
 } from './secondarySubtitle.js'
+import { subtitleDelayWithLatency, subtitleMediaTime } from './subtitleSync.js'
 import { SLEEP_TIMER_MINUTES, createSleepTimer } from './sleepTimer.js'
 import { buildSubtitleTimeline } from './subtitleTimeline.js'
 import { createCueText } from './cueText.js'
@@ -740,7 +741,10 @@ export default function Player(props) {
       hold: party.holdsStart(),
       ...(tracks || {}),
     })
-    if (!gone) engine.setZoom(s.zoomMode, my.aspect)
+    if (!gone) {
+      engine.setZoom(s.zoomMode, my.aspect)
+      engine.setNativeSubtitleDelay(avplaySubtitleLatencyMs())
+    }
   }
   function startReporting() {
     playback.startProgressReporting(
@@ -899,7 +903,7 @@ export default function Player(props) {
     updateCue(t)
     if (my.secEvents) updateSecondaryCue(t)
     if (s.panel === 'secOffset' || s.panel === 'subOffset') updateOffsetTimeline()
-    bitmapSubs.tick(t - my.subDelay)
+    bitmapSubs.tick(primarySubtitleTime(t))
     if (s.isLive) updateLiveWindow(t)
     // A trailer with the Skip button runs no segment prompts of its own.
     if (cinemaActive()) updateCinema(t)
@@ -1345,11 +1349,23 @@ export default function Player(props) {
       if (s.cue) s.cue = ''
       return
     }
-    const text = my.cueText(events, (t - my.subDelay) * TICKS)
+    const text = my.cueText(events, primarySubtitleTime(t) * TICKS)
     if (text !== s.cue) s.cue = text
   }
   function subStyle() {
     return resolveSubtitleStyleSettings(settings.all(), my.isHdr)
+  }
+  function avplaySubtitleLatencyMs() {
+    return engine.usesAvplay() ? settings.get('avplaySubtitleLatencyMs') : 0
+  }
+  function primarySubtitleDelay() {
+    return subtitleDelayWithLatency(my.subDelay, avplaySubtitleLatencyMs(), true)
+  }
+  function primarySubtitleTime(t) {
+    return subtitleMediaTime(t, my.subDelay, avplaySubtitleLatencyMs(), engine.usesAvplay())
+  }
+  function secondarySubtitleDelay() {
+    return subtitleDelayWithLatency(my.secDelay, avplaySubtitleLatencyMs(), engine.usesAvplay())
   }
   function applySubtitleStyle() {
     const st = subStyle()
@@ -1454,7 +1470,7 @@ export default function Player(props) {
     return my.secIndex != null || (settings.get('secondarySubtitlesEnabled') === true && secondaryStreams().length > 0)
   }
   function updateSecondaryCue(t) {
-    const text = secondaryCueText(my.secEvents, t * TICKS, my.secDelay) || ''
+    const text = secondaryCueText(my.secEvents, t * TICKS, secondarySubtitleDelay()) || ''
     if (text !== s.secCue) s.secCue = text
   }
   function setSecondaryDelay(seconds) {
@@ -1466,7 +1482,7 @@ export default function Player(props) {
     if (s.panel === 'subOffset') {
       my.subDelay = seconds
       updateCue(my.pos)
-      bitmapSubs.tick(my.pos - my.subDelay)
+      bitmapSubs.tick(primarySubtitleTime(my.pos))
     } else setSecondaryDelay(seconds)
     s.offsetShown = s.panel === 'subOffset' ? my.subDelay : my.secDelay
     updateOffsetTimeline()
@@ -1534,7 +1550,7 @@ export default function Player(props) {
       streamUrl,
       subtitleOrdinal: ordinal,
       language,
-      getTime: () => engine.currentTime() - my.subDelay,
+      getTime: () => engine.currentTime() - primarySubtitleDelay(),
       onEvents: (events) => {
         if (my.textSource !== source || my.subIndex !== index) return
         my.cues = (my.cues || []).concat(events).sort((x, y) => x.StartPositionTicks - y.StartPositionTicks)
@@ -1616,8 +1632,8 @@ export default function Player(props) {
         if (my.subIndex === index) loadCues(stream, true)
       }
       if (await trackFetch(bitmapSubs.startAss(stream, getAssFontScale(subStyle()), onError))) {
-        bitmapSubs.setPaused(engine.isPaused(), my.pos - my.subDelay)
-        bitmapSubs.tick(my.pos - my.subDelay)
+        bitmapSubs.setPaused(engine.isPaused(), primarySubtitleTime(my.pos))
+        bitmapSubs.tick(primarySubtitleTime(my.pos))
         // The worker reads the whole track and its fonts, which takes a while on a slow TV.
         trackFetch(bitmapSubs.ready(ASS_FETCH_INDICATOR_LIMIT, () => my.subIndex === index))
       } else if (my.subIndex === index) await loadCues(stream, quiet)
@@ -1629,7 +1645,7 @@ export default function Player(props) {
   }
   async function startPgs(stream, quiet) {
     const index = stream.index
-    if (await bitmapSubs.startPgs(stream, my.pos - my.subDelay)) bitmapSubs.tick(my.pos - my.subDelay)
+    if (await bitmapSubs.startPgs(stream, primarySubtitleTime(my.pos))) bitmapSubs.tick(primarySubtitleTime(my.pos))
     else if (!quiet && my.subIndex === index) toast($L('Subtitles could not be loaded'))
   }
   // AVPlay never put the embedded track on, so the same track is drawn here instead.
@@ -2554,7 +2570,7 @@ export default function Player(props) {
       my.recovery.setPaused(false)
       my.recovery.update({ playing: true, buffering: false })
       my.reconnect.playing()
-      bitmapSubs.setPaused(false, my.pos - my.subDelay)
+      bitmapSubs.setPaused(false, primarySubtitleTime(my.pos))
       channelPlaying()
       engine.setMediaPlaybackState(false)
       // On webOS 3 the video wants the memory, so the pictures of the pages hidden under the player are freed
@@ -2579,7 +2595,7 @@ export default function Player(props) {
       if (s.pauseInfo && !my.held && s.osd && s.panel === 'none') hideOsd()
       my.recovery.setPaused(true)
       my.reconnect.interrupted()
-      bitmapSubs.setPaused(true, my.pos - my.subDelay)
+      bitmapSubs.setPaused(true, primarySubtitleTime(my.pos))
       engine.setMediaPlaybackState(true)
       if (my.startReported && !my.stopped) playback.reportProgress(posTicks(), { isPaused: true, eventName: 'pause' })
     }),
@@ -2614,7 +2630,7 @@ export default function Player(props) {
     engine.on('buffering', (b) => {
       s.buffering = b
       my.recovery.update({ buffering: b })
-      bitmapSubs.setPaused(b || s.paused, my.pos - my.subDelay)
+      bitmapSubs.setPaused(b || s.paused, primarySubtitleTime(my.pos))
       if (b) my.reconnect.interrupted()
     }),
     engine.on('ended', () => onEnded()),

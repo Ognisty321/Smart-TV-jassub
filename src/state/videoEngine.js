@@ -435,6 +435,7 @@ let avLastMs = null
 let pausedError = null
 let nativeCues = false
 let nativeSub = null
+let nativeSubtitleDelayMs = 0
 let pendingTracks = null
 let cueTimer = null
 
@@ -477,6 +478,12 @@ const applyAvDisplay = () => {
 // An embedded track picked by its stream index. Text arrives through onsubtitlechange and draws
 // on the page, PGS draws on AVPlay's own plane. The silent flag is flipped once so the cue engine
 // starts delivering, and has to end unsilenced or no cue arrives at all.
+const applyNativeSubtitleDelay = () => {
+  if (!tz || !tz.avplaySetSubtitlePosition) return
+  const state = tz.avplayGetState()
+  if (state === 'PLAYING' || state === 'PAUSED') tz.avplaySetSubtitlePosition(nativeSubtitleDelayMs)
+}
+
 const applyNativeSubtitle = (stream, streams, trackInfo) => {
   const embedded = (streams || []).filter((s) => s.isEmbeddedNative)
   const at = tzTracks.mapJellyfinTrackToTizen(trackInfo || tz.avplayGetTracks(), embedded, 'TEXT', stream.index)
@@ -486,6 +493,7 @@ const applyNativeSubtitle = (stream, streams, trackInfo) => {
   tz.avplaySetSilentSubtitle(false)
   nativeCues = !stream.isImageBased
   nativeSub = { stream, streams }
+  applyNativeSubtitleDelay()
   return true
 }
 
@@ -689,6 +697,7 @@ const openAvplay = async (o) => {
     avLastMs = null
     avPlayIssuedAt = Date.now()
     tz.avplayPlay()
+    applyNativeSubtitleDelay()
     avPaused = false
     screen(true)
     later(() => {
@@ -877,6 +886,11 @@ export const startTimedOut = () => timedOut
 export const readyState = () => (mode === 'video' && video ? video.readyState : 0)
 export const elementPaused = () => (mode === 'video' && video ? video.paused : false)
 export const usesAvplay = () => mode === 'avplay'
+
+export const setNativeSubtitleDelay = (ms) => {
+  nativeSubtitleDelayMs = Math.max(0, Number(ms) || 0)
+  if (mode === 'avplay') applyNativeSubtitleDelay()
+}
 
 // Whether the open stream's seeks go back to Silo, and whether its copy already lists a title
 // position, which a seek there reaches without a reload.
