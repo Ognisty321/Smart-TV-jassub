@@ -39,4 +39,21 @@ assert.match(scaled, /Style: Default,Roboto,30,&H00FFFFFF,1/)
 assert.match(scaled, /Style: Sign,Roboto,50.25,&H00FFFFFF,1/)
 assert.match(scaled, /\{\\fs27\\pos\(20,20\)\}sized \{\\fs\}reset/, 'only a number follows fs')
 assert.equal(scaleAssFontSizes(script, 1), script)
+
+
+const { supportsJassubRenderer } = await import('./assRenderer.js?support')
+globalThis.Worker = function Worker() {}
+globalThis.ResizeObserver = function ResizeObserver() {}
+globalThis.HTMLCanvasElement = function HTMLCanvasElement() {}
+globalThis.HTMLCanvasElement.prototype.transferControlToOffscreen = function transferControlToOffscreen() {}
+const ua = (value) => Object.defineProperty(globalThis, 'navigator', { value: { userAgent: value }, configurable: true })
+ua('Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.5 TV Safari/537.36')
+assert.equal(supportsJassubRenderer(), true, 'Tizen app webview exposes Chromium 85 without a Chrome token')
+ua('Mozilla/5.0 (SMART-TV; LINUX; Tizen 8.0) AppleWebKit/537.36 (KHTML, like Gecko) 108.0.5359.1/8.0 TV Safari/537.36')
+assert.equal(supportsJassubRenderer(), true, 'newer Tizen app webview')
+ua('Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) 76.0.3809.146/6.0 TV Safari/537.36')
+assert.equal(supportsJassubRenderer(), false, 'Tizen 6 stays on the compatibility engine')
+ua('Mozilla/5.0 (SMART-TV; Linux; Tizen 6.5) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/5.0 Chrome/85.0.4183.93 TV Safari/537.36')
+assert.equal(supportsJassubRenderer(), true, 'Samsung Browser keeps its Chrome token')
+
 console.log('subtitle engine files ok')

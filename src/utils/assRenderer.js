@@ -10,7 +10,11 @@ import {assetUrl} from './assetUrl.js';
 const getChromiumMajorVersion = () => {
 	const ua = navigator.userAgent || '';
 	const match = ua.match(/(?:Chrome|Chromium)\/(\d+)/i);
-	return match ? parseInt(match[1], 10) : null;
+	if (match) return parseInt(match[1], 10);
+	// Tizen's app webview names the Chromium version as the application version:
+	// "108.0.5359.1/8.0 TV" means Chromium 108 on Tizen 8.
+	const tizen = /tizen/i.test(ua) && ua.match(/\(KHTML, like Gecko\)\s+(\d+)(?:\.\d+){2,4}\/[\d.]+\s+TV\b/i);
+	return tizen ? parseInt(tizen[1], 10) : null;
 };
 
 const supportsOctopusRenderer = () => {
@@ -25,7 +29,7 @@ const supportsOctopusRenderer = () => {
 // Jassub's own floor is Chrome 85. The API checks keep embedded or future Chromium-like engines
 // honest; the version check keeps older TV browsers on the compatibility engine instead of letting
 // one transfer the canvas before its WASM turns out not to compile.
-const supportsJassubRenderer = () => {
+export const supportsJassubRenderer = () => {
 	const chromiumMajor = getChromiumMajorVersion();
 	if (chromiumMajor && chromiumMajor < 85) return false;
 	if (!chromiumMajor) return false;
@@ -106,6 +110,12 @@ const createOctopusRenderer = async (options, onError) => {
 	}
 };
 
+// Heavy typesetting is rasterized in one worker thread. These steps trade sharpness for frame time
+// only after several slow frames, then recover after a sustained quiet period.
+const JASSUB_QUALITY_LEVELS = [1, 0.8, 0.65, 0.5];
+const JASSUB_SLOW_FRAME_MS = 34;
+const JASSUB_FAST_FRAME_MS = 12;
+
 // Jassub has no clock of its own in canvas-only use. This facade follows the same contract as
 // SubtitlesOctopus: ticks are absolute corrections, while playing time advances between them so
 // animated typesetting keeps moving. Most frames come back unchanged from libass and cost little.
@@ -120,9 +130,11 @@ class JassubCanvasRenderer {
 		// size with a guessed letterboxed size.
 		instance._videoWidth = this.width;
 		instance._videoHeight = this.height;
-		// Moonfin owns this canvas's geometry. Jassub's element observer would otherwise race a
-		// manual render, clear the backing store in a resize, and then skip the unchanged frame.
+		// Moonfin owns this canvas's geometry. Jassub's element observer can already have a
+		// callback queued before disconnecting it, so automatic resizing is disabled outright;
+		// canvas-only rendering never needs its letterbox guessing.
 		instance._ro.disconnect();
+		instance.resize = async () => {};
 		this.time = 0;
 		this.clockTime = 0;
 		this.clockAt = 0;
@@ -130,6 +142,11 @@ class JassubCanvasRenderer {
 		this.timer = null;
 		this.failed = false;
 		this.destroyed = false;
+		this.qualityLevel = 0;
+		this.frameCosts = [];
+		this.fastFrames = 0;
+		this.qualityChangedAt = 0;
+		this.resizeWrite = Promise.resolve();
 		this.trackWrite = Promise.resolve();
 		this.onError = onError;
 		instance.ready.catch((err) => this.fail(err));
@@ -153,16 +170,53 @@ class JassubCanvasRenderer {
 	}
 
 	render(repaint = false) {
-		if (this.destroyed || this.failed) return;
-		this.instance.ready.then(() => {
+		if (this.destroyed || this.failed) return Promise.resolve();
+		return this.instance.ready.then(() => {
 			if (this.destroyed || this.failed) return;
+			const started = performance.now() || Date.now();
 			return this.instance.manualRender({
-				expectedDisplayTime: performance.now() || Date.now(),
+				expectedDisplayTime: started,
 				width: Math.max(1, this.width),
 				height: Math.max(1, this.height),
 				mediaTime: this.now(),
-			}, repaint);
+			}, repaint).then(() => this.adaptQuality((performance.now() || Date.now()) - started));
 		}).catch((err) => this.fail(err));
+	}
+
+	adaptQuality(cost) {
+		if (this.destroyed || this.failed) return;
+		const now = performance.now() || Date.now();
+		// Unchanged frames return almost immediately. Judge load only by frames which did
+		// enough work to prove libass actually rasterized or composited them; otherwise a
+		// heavy track which changes every other video frame looks half cheap and half slow.
+		if (cost >= 10) {
+			this.frameCosts.push(cost);
+			if (this.frameCosts.length > 5) this.frameCosts.shift();
+		}
+		if (cost <= JASSUB_FAST_FRAME_MS) this.fastFrames += 1;
+		else this.fastFrames = 0;
+		const slowFrames = this.frameCosts.filter((frameCost) => frameCost >= JASSUB_SLOW_FRAME_MS).length;
+		if (this.frameCosts.length >= 3 && slowFrames >= 3 && this.qualityLevel < JASSUB_QUALITY_LEVELS.length - 1 && now - this.qualityChangedAt > 300) {
+			this.qualityLevel += 1;
+			this.frameCosts = [];
+			this.fastFrames = 0;
+			this.qualityChangedAt = now;
+			this.resize();
+		} else if (this.fastFrames >= 96 && this.qualityLevel > 0 && now - this.qualityChangedAt > 4000) {
+			this.qualityLevel -= 1;
+			this.frameCosts = [];
+			this.fastFrames = 0;
+			this.qualityChangedAt = now;
+			this.resize();
+		}
+	}
+
+	renderSize() {
+		const scale = JASSUB_QUALITY_LEVELS[this.qualityLevel];
+		return {
+			width: Math.max(1, Math.round(this.width * scale)),
+			height: Math.max(1, Math.round(this.height * scale)),
+		};
 	}
 
 	startClock() {
@@ -181,9 +235,19 @@ class JassubCanvasRenderer {
 		this.height = Math.max(1, Math.round(height || this.height));
 		this.instance._videoWidth = this.width;
 		this.instance._videoHeight = this.height;
-		this.instance.ready.then(() => {
-			if (!this.destroyed) return this.instance.resize(true, this.width, this.height);
-		}).catch((err) => this.fail(err));
+		this.resizeWrite = this.resizeWrite
+			.then(() => this.instance.ready)
+			.then(() => {
+				if (!this.destroyed) {
+					const size = this.renderSize();
+					return this.instance.renderer._resizeCanvas(size.width, size.height, 0, 0);
+				}
+			})
+			.then(() => {
+				if (!this.destroyed) this.render(true);
+			})
+			.catch((err) => this.fail(err));
+		return this.resizeWrite;
 	}
 
 	setTrack(content) {
@@ -232,10 +296,11 @@ const createJassubRenderer = async (options, onError) => {
 			availableFonts: {roboto: fallback},
 			defaultFont: 'roboto',
 			queryFonts: false,
-			// TV browsers rarely expose deviceMemory. Keep the ceiling below the desktop default while
-			// leaving enough room for font-heavy anime typesetting.
-			libassMemoryLimit: 64,
-			libassGlyphLimit: 2000,
+			// TV browsers rarely expose deviceMemory. Use upstream's low-memory tier: in the
+			// extreme typesetting harness it capped WASM heap growth near 135 MB instead of 203 MB,
+			// while producing the same pixels and broadly unchanged render times.
+			libassMemoryLimit: 32,
+			libassGlyphLimit: 1000,
 			debug: false
 		});
 		return new JassubCanvasRenderer(instance, onError);
@@ -245,8 +310,13 @@ const createJassubRenderer = async (options, onError) => {
 	}
 };
 
-const createRenderer = (options, onError) =>
-	supportsJassubRenderer() ? createJassubRenderer(options, onError) : createOctopusRenderer(options, onError);
+const createRenderer = async (options, onError, compatibility = false) => {
+	if (supportsJassubRenderer() && !compatibility) {
+		const renderer = await createJassubRenderer(options, onError);
+		if (renderer) return renderer;
+	}
+	return createOctopusRenderer(options, onError);
+};
 
 // The script each renderer started from, so a size change can hand it over again and the offset
 // timeline can list its lines.
@@ -293,7 +363,7 @@ const fetchScript = async (url) => {
 	}
 };
 
-export const initAssCanvasRenderer = async (canvasElement, subtitleUrl, fontsUrl, onError) => {
+export const initAssCanvasRenderer = async (canvasElement, subtitleUrl, fontsUrl, onError, compatibility = false) => {
 	if (!canvasElement || !subtitleUrl) return null;
 	canvasElement.width = window.innerWidth || canvasElement.clientWidth || 1920;
 	canvasElement.height = window.innerHeight || canvasElement.clientHeight || 1080;
@@ -304,7 +374,7 @@ export const initAssCanvasRenderer = async (canvasElement, subtitleUrl, fontsUrl
 	const options = script === null
 		? {canvas: canvasElement, subUrl: subtitleUrl, fonts: fontsUrl}
 		: {canvas: canvasElement, subContent: scaleAssFontSizes(script, scale), fonts: fontsUrl};
-	const renderer = await createRenderer(options, onError);
+	const renderer = await createRenderer(options, onError, compatibility);
 	if (renderer && script !== null) {
 		tracks.set(renderer, {script, scale});
 		// The size may have changed while the renderer was starting.

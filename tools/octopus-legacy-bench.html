@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8"><base href="/">
+<style>html,body{margin:0;width:100%;height:100%;background:#000}canvas{position:absolute;inset:0;width:100%;height:100%}</style>
+<canvas id="subs" width="1920" height="1080"></canvas>
+<script src="/node_modules/libass-wasm/dist/js/subtitles-octopus.js"></script>
+<script>
+(function () {
+  window.__errors = []
+  window.__phase = 'loaded'
+  window.addEventListener('error', function (event) { window.__errors.push(String(event.message || event.error)) })
+  var ass = '[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Roboto,54,&H00FFFFFF,&H000000FF,&H00102040,&H80000000,-1,0,0,0,100,100,0,0,1,2,1,2,30,30,36,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:06.00,Default,,0,0,0,,Legacy fallback rendering test\n'
+  function alpha(canvas) {
+    var data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
+    var count = 0
+    for (var i = 3; i < data.length; i += 4) if (data[i]) count++
+    return { alpha: count, width: canvas.width, height: canvas.height }
+  }
+  window.__runBench = function () {
+    return new Promise(function (resolve) {
+      var canvas = document.getElementById('subs')
+      var renderer = new SubtitlesOctopus({
+        canvas: canvas,
+        subContent: ass,
+        workerUrl: '/subtitles-octopus-worker.js',
+        legacyWorkerUrl: '/subtitles-octopus-worker-legacy.js',
+        fallbackFont: '/ass-fallback-font.ttf',
+        targetFps: 24,
+        renderMode: 'wasm-blend',
+        prescaleFactor: 0.8,
+        maxRenderHeight: 2160,
+        debug: false,
+        onError: function (error) { window.__errors.push('engine:' + (error && error.message || error)) }
+      })
+      var started = Date.now()
+      function poll() {
+        if (renderer.workerActive || Date.now() - started > 5000) {
+          renderer.resize(1920, 1080)
+          renderer.setIsPaused(true, 1.5)
+          renderer.setCurrentTime(1.5)
+          setTimeout(function () {
+            var capture = alpha(canvas)
+            renderer.setCurrentTime(8)
+            setTimeout(function () {
+              var afterEnd = alpha(canvas)
+              renderer.setCurrentTime(1.5)
+              setTimeout(function () {
+                var seekBack = alpha(canvas)
+                var result = { engine: 'octopus-actual', workerActive: renderer.workerActive, capture: capture, afterEnd: afterEnd, seekBack: seekBack, errors: window.__errors }
+                try { renderer.dispose() } catch (e) {}
+                resolve(result)
+              }, 500)
+            }, 500)
+          }, 1000)
+        } else setTimeout(poll, 100)
+      }
+      poll()
+    })
+  }
+}())
+</script>

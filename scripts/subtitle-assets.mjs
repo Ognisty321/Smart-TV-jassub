@@ -61,10 +61,28 @@ const patchJassubWorker = () => ({
     const path = id.replace(/\\/g, '/')
     if (path.endsWith('/jassub/dist/worker/worker.js')) {
       if (!GLUE_IMPORT.test(code)) throw new Error('jassub worker.js changed, update scripts/subtitle-assets.mjs')
-      return { code: code.replace(GLUE_IMPORT, 'await self.jassubLoadWasmGlue(data.wasmWorkerUrl)'), map: null }
+      const debugHook = [
+        '    _drawDebug(time) {',
+        '      const view = this._wasm.rawRender(time, 1);',
+        '      return JSON.stringify({',
+        '        length: view?.length || 0,',
+        '        renderer: this._gpurender.gl ? (typeof WebGL2RenderingContext !== "undefined" && this._gpurender.gl instanceof WebGL2RenderingContext ? "webgl2" : "webgl1") : "canvas2d",',
+        '        canvas: this._gpurender.canvas ? [this._gpurender.canvas.width, this._gpurender.canvas.height] : null,',
+        '        desynchronized: self.jassubDesynchronized,',
+        '        heap: self.HEAPU8RAW?.length || 0,',
+        '      });',
+        '    }',
+        '',
+      ].join('\n')
+      if (!code.includes('  _setColorSpace(matrix, fullRange)')) throw new Error('jassub worker methods changed, update scripts/subtitle-assets.mjs')
+      return { code: code.replace(GLUE_IMPORT, 'await self.jassubLoadWasmGlue(data.wasmWorkerUrl)').replace('  _setColorSpace(matrix, fullRange)', `${debugHook}  _setColorSpace(matrix, fullRange)`), map: null }
     }
     if (/\/jassub\/dist\/wasm\/jassub-worker(-modern)?\.js$/.test(path)) {
       return { code: code.replace(META_URL, 'self.location.href').replace(MODULE_PTHREAD, ''), map: null }
+    }
+    if (/\/jassub\/dist\/worker\/renderers\/(2d|webgl1|webgl2)-renderer\.js$/.test(path)) {
+      if (!code.includes('desynchronized: true')) throw new Error('jassub renderer canvas options changed, update scripts/subtitle-assets.mjs')
+      return { code: code.replaceAll('desynchronized: true', 'desynchronized: self.jassubDesynchronized'), map: null }
     }
   },
 })

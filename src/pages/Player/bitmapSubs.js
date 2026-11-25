@@ -36,12 +36,18 @@ export const stop = () => {
 }
 
 // Resolves true once the track draws. A newer start or a stop in between throws this one away.
-export const startAss = async (stream, fontScale, onError) => {
+export const startAss = async (stream, fontScale, onError, compatibility = false) => {
   stop()
   const mine = gen
   const url = playback.getAssSubtitleUrl(stream)
   if (!url) return false
-  const r = await initAssCanvasRenderer(subtitleCanvas(), url, playback.getAssFontsUrl(stream), onError)
+  const handleError = (err) => {
+    // A transferred canvas can't be handed back, so the compatibility engine gets a fresh one
+    // through a normal start. Only the still-current track may retry itself.
+    if (!compatibility && mine === gen) startAss(stream, fontScale, onError, true)
+    else if (onError) onError(err)
+  }
+  const r = await initAssCanvasRenderer(subtitleCanvas(), url, playback.getAssFontsUrl(stream), handleError, compatibility)
   if (mine !== gen) {
     disposeAssRenderer(r)
     return false
