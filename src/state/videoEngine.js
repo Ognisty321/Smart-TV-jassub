@@ -3,6 +3,7 @@
 // through AVPlay, which draws on a hardware plane under the page. Both report time in seconds, on
 // the title's timeline: a Silo remux opened mid-title counts from where it starts.
 import { getPlatform, isVega } from '../platform.js'
+import { createPlayClock } from './playClock.js'
 import {
   initVideo,
   getSharedVideoElement,
@@ -55,6 +56,7 @@ let tzTracks = null
 let avPaused = false
 let avBuffering = false
 let avTime = 0
+const avClock = createPlayClock()
 let avDuration = 0
 let ended = false
 // Each open counts up, so a listener or timer left from the last stream does nothing.
@@ -685,6 +687,7 @@ const openAvplay = async (o) => {
       pausedError = null
       const streamMs = Number(ms) || 0
       avTime = streamMs / 1000 + line.offset
+      avClock.sample(avTime)
       if (!moved && tz.avplayGetState() === 'PLAYING') {
         const advanced = avLastMs != null && streamMs > avLastMs
         avLastMs = streamMs
@@ -808,6 +811,7 @@ export const open = async (opts) => {
   nativeSubtitleDelayMs = Math.max(0, Number(opts.nativeSubtitleDelayMs) || 0)
   clearNativeCueSchedule()
   avBuffering = false
+  avClock.reset(0)
   const source = opts.mediaSource || {}
   line = {
     offset: (source.SiloTimelineOffsetTicks || 0) / 10000000,
@@ -931,6 +935,14 @@ export const toggle = () => (isPaused() ? play() : pause())
 
 export const currentTime = () => (mode === 'avplay' ? avTime : videoTime())
 
+// The position between two reports, for what has to land on a frame. AVPlay only reports in steps,
+// and a <video> reads its own clock.
+export const preciseTime = () => {
+  if (mode === 'avplay') return avClock.read(!avPaused && !avBuffering)
+  if (!video || resumeAt > 0) return lastTick == null ? 0 : lastTick + line.offset
+  return videoTime()
+}
+
 export const duration = () => (mode === 'avplay' ? avDuration : videoDuration())
 
 // Whether the open stream's time has moved, which is what makes a later failure a lost stream
@@ -991,6 +1003,7 @@ export const seek = async (seconds) => {
   const to = Math.max(0, seconds)
   if (mode === 'avplay') {
     avTime = to
+    avClock.reset(to)
     clearNativeCueSchedule()
     emit('cue', '')
     if (line.viaServer) return viaServer(to)

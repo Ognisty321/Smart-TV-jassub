@@ -123,6 +123,10 @@ const TICKS = 10000000
 const SLIDESHOW_ERROR_DELAY = 2500
 // A Silo stream moves to a new token while it plays, and is reopened on it.
 const SILO_RENEWAL_CHECK_MS = 15000
+// How often the subtitle lines are placed while a stream plays, and how far the engine's running
+// position may sit from its last report and still be believed.
+const SUBTITLE_FRAME_MS = 20
+const SUBTITLE_CLOCK_SLACK_S = 2
 // AVPlay logs every read of a live range, which only grows a segment at a time.
 const LIVE_RANGE_READ_MS = 2000
 // Cinema Mode's Skip button stays up for this much of a trailer, so only a longer one gets it.
@@ -897,7 +901,7 @@ export default function Player(props) {
     my.pos = t
     if (my.subtitleSeekHold) {
       my.subtitleSeekHold = false
-      bitmapSubs.setPaused(false, primarySubtitleTime(t))
+      bitmapSubs.setPaused(false, primarySubtitleTime(subtitlePos()))
     }
     // The display only moves when a shown second changes, so a hidden OSD costs nothing.
     if (!s.position || (s.osd && Math.floor(t) !== Math.floor(s.position))) {
@@ -905,10 +909,11 @@ export default function Player(props) {
       if (s.osd) updateBuffered()
       if (s.osd && my.tp && refs.controls) refs.controls.warmAt(t * 1000)
     }
-    updateCue(t)
-    if (my.secEvents) updateSecondaryCue(t)
+    const st = subtitlePos()
+    updateCue(st)
+    if (my.secEvents) updateSecondaryCue(st)
     if (s.panel === 'secOffset' || s.panel === 'subOffset') updateOffsetTimeline()
-    bitmapSubs.tick(primarySubtitleTime(t))
+    bitmapSubs.tick(primarySubtitleTime(st))
     if (s.isLive) updateLiveWindow(t)
     // A trailer with the Skip button runs no segment prompts of its own.
     if (cinemaActive()) updateCinema(t)
@@ -1380,6 +1385,21 @@ export default function Player(props) {
   function secondarySubtitleDelay() {
     return subtitleDelayWithLatency(my.secDelay, avplaySubtitleLatencyMs(), engine.usesAvplay())
   }
+  // The engine's position between its reports, which is what a subtitle is timed against. It only
+  // counts next to the last reported position, so a seek or a resume still settling can't mislead it.
+  function subtitlePos() {
+    const t = engine.preciseTime()
+    return Math.abs(t - my.pos) < SUBTITLE_CLOCK_SLACK_S ? t : my.pos
+  }
+  // Position reports come a few times a second, so the lines are placed between them as well.
+  function subtitleFrame() {
+    if (my.stopped || my.subtitleSeekHold || s.paused || engine.isPaused()) return
+    if (!my.cues && !my.secEvents && !bitmapSubs.drawing()) return
+    const t = subtitlePos()
+    updateCue(t)
+    if (my.secEvents) updateSecondaryCue(t)
+    bitmapSubs.tick(primarySubtitleTime(t))
+  }
   function resyncSubtitlesAt(t) {
     updateCue(t)
     if (my.secEvents) updateSecondaryCue(t)
@@ -1504,7 +1524,7 @@ export default function Player(props) {
       my.subDelay = seconds
       engine.setNativeSubtitleDelay(effectiveNativeSubtitleDelayMs())
       updateCue(my.pos)
-      bitmapSubs.tick(primarySubtitleTime(my.pos))
+      bitmapSubs.tick(primarySubtitleTime(subtitlePos()))
     } else setSecondaryDelay(seconds)
     s.offsetShown = s.panel === 'subOffset' ? my.subDelay : my.secDelay
     updateOffsetTimeline()
@@ -1654,8 +1674,8 @@ export default function Player(props) {
         if (my.subIndex === index) loadCues(stream, true)
       }
       if (await trackFetch(bitmapSubs.startAss(stream, getAssFontScale(subStyle()), onError))) {
-        bitmapSubs.setPaused(engine.isPaused(), primarySubtitleTime(my.pos))
-        bitmapSubs.tick(primarySubtitleTime(my.pos))
+        bitmapSubs.setPaused(engine.isPaused(), primarySubtitleTime(subtitlePos()))
+        bitmapSubs.tick(primarySubtitleTime(subtitlePos()))
         // The worker reads the whole track and its fonts, which takes a while on a slow TV.
         trackFetch(bitmapSubs.ready(ASS_FETCH_INDICATOR_LIMIT, () => my.subIndex === index))
       } else if (my.subIndex === index) await loadCues(stream, quiet)
@@ -1667,7 +1687,7 @@ export default function Player(props) {
   }
   async function startPgs(stream, quiet) {
     const index = stream.index
-    if (await bitmapSubs.startPgs(stream, primarySubtitleTime(my.pos))) bitmapSubs.tick(primarySubtitleTime(my.pos))
+    if (await bitmapSubs.startPgs(stream, primarySubtitleTime(subtitlePos()))) bitmapSubs.tick(primarySubtitleTime(subtitlePos()))
     else if (!quiet && my.subIndex === index) toast($L('Subtitles could not be loaded'))
   }
   // AVPlay never put the embedded track on, so the same track is drawn here instead.
@@ -2592,7 +2612,7 @@ export default function Player(props) {
       my.recovery.setPaused(false)
       my.recovery.update({ playing: true, buffering: false })
       my.reconnect.playing()
-      bitmapSubs.setPaused(false, primarySubtitleTime(my.pos))
+      bitmapSubs.setPaused(false, primarySubtitleTime(subtitlePos()))
       channelPlaying()
       engine.setMediaPlaybackState(false)
       // On webOS 3 the video wants the memory, so the pictures of the pages hidden under the player are freed
@@ -2617,7 +2637,7 @@ export default function Player(props) {
       if (s.pauseInfo && !my.held && s.osd && s.panel === 'none') hideOsd()
       my.recovery.setPaused(true)
       my.reconnect.interrupted()
-      bitmapSubs.setPaused(true, primarySubtitleTime(my.pos))
+      bitmapSubs.setPaused(true, primarySubtitleTime(subtitlePos()))
       engine.setMediaPlaybackState(true)
       if (my.startReported && !my.stopped) playback.reportProgress(posTicks(), { isPaused: true, eventName: 'pause' })
     }),
@@ -2652,7 +2672,7 @@ export default function Player(props) {
     engine.on('buffering', (b) => {
       s.buffering = b
       my.recovery.update({ buffering: b })
-      bitmapSubs.setPaused(b || s.paused, primarySubtitleTime(my.pos))
+      bitmapSubs.setPaused(b || s.paused, primarySubtitleTime(subtitlePos()))
       if (b) my.reconnect.interrupted()
     }),
     engine.on('ended', () => onEnded()),
@@ -2774,6 +2794,7 @@ export default function Player(props) {
     if (gone) return
     setupLifecycle()
     every(checkSiloToken, SILO_RENEWAL_CHECK_MS)
+    every(subtitleFrame, SUBTITLE_FRAME_MS)
     // A route without a start position starts where the item was left.
     const given = props.startPositionTicks != null && props.startPositionTicks !== ''
     const ticks = props.resume === false ? 0 : given ? Number(props.startPositionTicks) || 0 : null

@@ -357,7 +357,12 @@ class JassubCanvasRenderer {
 
 	setCurrentTime(seconds) {
 		this.time = Number(seconds) || 0;
-		if (!this.paused && Math.abs(this.time - this.now()) < 0.08) return;
+		const drift = Math.abs(this.time - this.now());
+		// A small drift is taken up by the running clock without a redraw of its own.
+		if (!this.paused && drift < 0.08) {
+			if (drift > 0.015) this.anchor(this.time);
+			return;
+		}
 		this.anchor(this.time);
 		this.render(false);
 	}

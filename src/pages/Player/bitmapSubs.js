@@ -182,6 +182,8 @@ export const setPaused = (nextPaused, seconds) => {
 }
 
 // The ASS track's lines, for the offset strip's timeline.
+export const drawing = () => !!(ass || pgs)
+
 export const assEvents = () => (ass ? assTimelineEvents(ass) : null)
 
 // Resolves once the ASS track has read its script and fonts, or after ms, or once keepWaiting() says no.
