@@ -149,7 +149,7 @@ export const createSupWindowRenderer = async ({ url, canvas, PgsRenderer, at = 0
   // libpgs skips a render when the set index hasn't changed, which a new window can't tell apart, so a
   // load goes through -1 first. Both draws land in the same frame.
   const impl = r.implementation
-  let clock = Math.max(0, at)
+  let clock = at
   let win = null
   let loading = null
   let disposed = false
@@ -238,7 +238,7 @@ export const createSupWindowRenderer = async ({ url, canvas, PgsRenderer, at = 0
   else moveTo(clock)
   return {
     renderAtTimestamp: (t) => {
-      clock = Math.max(0, t)
+      clock = t
       update()
     },
     dispose: () => {

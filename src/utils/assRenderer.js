@@ -213,7 +213,7 @@ class JassubCanvasRenderer {
 	}
 
 	anchor(seconds) {
-		this.clockTime = Math.max(0, seconds || 0);
+		this.clockTime = Number(seconds) || 0;
 		this.clockAt = performance.now() || Date.now();
 	}
 
@@ -356,7 +356,7 @@ class JassubCanvasRenderer {
 	}
 
 	setCurrentTime(seconds) {
-		this.time = Math.max(0, seconds || 0);
+		this.time = Number(seconds) || 0;
 		if (!this.paused && Math.abs(this.time - this.now()) < 0.08) return;
 		this.anchor(this.time);
 		this.render(false);
@@ -511,7 +511,7 @@ export const disposeAssRenderer = (renderer) => {
 
 export const setAssTime = (renderer, currentTimeSeconds) => {
 	if (renderer?.setCurrentTime) {
-		renderer.setCurrentTime(Math.max(0, currentTimeSeconds));
+		renderer.setCurrentTime(Number(currentTimeSeconds) || 0);
 	}
 };
 

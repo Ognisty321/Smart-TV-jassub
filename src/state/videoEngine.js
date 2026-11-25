@@ -53,6 +53,7 @@ let hlsStarted = () => true
 let tz = null
 let tzTracks = null
 let avPaused = false
+let avBuffering = false
 let avTime = 0
 let avDuration = 0
 let ended = false
@@ -438,6 +439,55 @@ let nativeSub = null
 let nativeSubtitleDelayMs = 0
 let pendingTracks = null
 let cueTimer = null
+let cueAction = null
+let cueFrozen = false
+
+const clearNativeCueSchedule = () => {
+  clearTimeout(cueTimer)
+  cueAction = null
+  cueFrozen = false
+}
+
+const scheduleNativeCueAction = (run, delayMs) => {
+  clearTimeout(cueTimer)
+  cueFrozen = false
+  cueAction = { run, remaining: Math.max(0, delayMs), startedAt: Date.now() }
+  if (cueAction.remaining <= 0 && !avPaused && !avBuffering) {
+    const action = cueAction
+    cueAction = null
+    action.run()
+    return
+  }
+  if (cueAction.remaining <= 0) {
+    cueFrozen = true
+    return
+  }
+  cueTimer = setTimeout(() => {
+    const action = cueAction
+    cueAction = null
+    if (action) action.run()
+  }, cueAction.remaining)
+  syncNativeCueSchedule()
+}
+
+const freezeNativeCueSchedule = () => {
+  if (!cueAction || cueFrozen) return
+  clearTimeout(cueTimer)
+  cueAction.remaining = Math.max(0, cueAction.remaining - (Date.now() - cueAction.startedAt))
+  cueFrozen = true
+}
+
+const resumeNativeCueSchedule = () => {
+  if (!cueAction || !cueFrozen) return
+  cueFrozen = false
+  const action = cueAction
+  scheduleNativeCueAction(action.run, action.remaining)
+}
+
+const syncNativeCueSchedule = () => {
+  if (avPaused || avBuffering) freezeNativeCueSchedule()
+  else resumeNativeCueSchedule()
+}
 
 const avStreamMs = (titleMs) => Math.max(0, titleMs - line.offset * 1000)
 
@@ -478,12 +528,6 @@ const applyAvDisplay = () => {
 // An embedded track picked by its stream index. Text arrives through onsubtitlechange and draws
 // on the page, PGS draws on AVPlay's own plane. The silent flag is flipped once so the cue engine
 // starts delivering, and has to end unsilenced or no cue arrives at all.
-const applyNativeSubtitleDelay = () => {
-  if (!tz || !tz.avplaySetSubtitlePosition) return
-  const state = tz.avplayGetState()
-  if (state === 'PLAYING' || state === 'PAUSED') tz.avplaySetSubtitlePosition(nativeSubtitleDelayMs)
-}
-
 const applyNativeSubtitle = (stream, streams, trackInfo) => {
   const embedded = (streams || []).filter((s) => s.isEmbeddedNative)
   const at = tzTracks.mapJellyfinTrackToTizen(trackInfo || tz.avplayGetTracks(), embedded, 'TEXT', stream.index)
@@ -493,7 +537,6 @@ const applyNativeSubtitle = (stream, streams, trackInfo) => {
   tz.avplaySetSilentSubtitle(false)
   nativeCues = !stream.isImageBased
   nativeSub = { stream, streams }
-  applyNativeSubtitleDelay()
   return true
 }
 
@@ -623,10 +666,15 @@ const openAvplay = async (o) => {
   let lastTrackTry = 0
   tz.avplaySetListener({
     onbufferingstart: () => {
-      if (mine === gen) emit('buffering', true)
+      if (mine !== gen) return
+      avBuffering = true
+      syncNativeCueSchedule()
+      emit('buffering', true)
     },
     onbufferingcomplete: () => {
       if (mine !== gen) return
+      avBuffering = false
+      syncNativeCueSchedule()
       emit('buffering', false)
       latch()
       runDeferred()
@@ -666,9 +714,14 @@ const openAvplay = async (o) => {
     onevent: () => {},
     onsubtitlechange: (dur, text, type) => {
       if (mine !== gen || !nativeCues || type === 1 || type === '1') return
-      clearTimeout(cueTimer)
-      emit('cue', avplaySubtitleText(text))
-      if (text && dur > 0) cueTimer = setTimeout(() => emit('cue', ''), parseInt(dur, 10))
+      clearNativeCueSchedule()
+      // Samsung emits this callback on the media clock. Hold the page cue back by the same
+      // device-local display latency used for canvas subtitles; pause and buffering freeze it.
+      const show = () => {
+        emit('cue', avplaySubtitleText(text))
+        if (text && dur > 0) scheduleNativeCueAction(() => emit('cue', ''), parseInt(dur, 10))
+      }
+      scheduleNativeCueAction(show, nativeSubtitleDelayMs)
     },
     ondrmevent: () => {},
   })
@@ -697,7 +750,6 @@ const openAvplay = async (o) => {
     avLastMs = null
     avPlayIssuedAt = Date.now()
     tz.avplayPlay()
-    applyNativeSubtitleDelay()
     avPaused = false
     screen(true)
     later(() => {
@@ -753,7 +805,9 @@ export const open = async (opts) => {
   resumeAt = 0
   nativeCues = false
   nativeSub = null
-  clearTimeout(cueTimer)
+  nativeSubtitleDelayMs = Math.max(0, Number(opts.nativeSubtitleDelayMs) || 0)
+  clearNativeCueSchedule()
+  avBuffering = false
   const source = opts.mediaSource || {}
   line = {
     offset: (source.SiloTimelineOffsetTicks || 0) / 10000000,
@@ -840,6 +894,7 @@ export const play = () => {
   if (mode === 'avplay') {
     tz.avplayPlay()
     avPaused = false
+    syncNativeCueSchedule()
     playing()
     // An error swallowed during the pause can mean a dead pipeline, so it surfaces if this doesn't move.
     if (pausedError) {
@@ -862,6 +917,7 @@ export const pause = () => {
     if (tz.avplayGetState() !== 'PLAYING') return
     tz.avplayPause()
     avPaused = true
+    syncNativeCueSchedule()
     paused()
   } else if (video) {
     dropPlayOnSeeked()
@@ -889,7 +945,6 @@ export const usesAvplay = () => mode === 'avplay'
 
 export const setNativeSubtitleDelay = (ms) => {
   nativeSubtitleDelayMs = Math.max(0, Number(ms) || 0)
-  if (mode === 'avplay') applyNativeSubtitleDelay()
 }
 
 // Whether the open stream's seeks go back to Silo, and whether its copy already lists a title
@@ -936,6 +991,8 @@ export const seek = async (seconds) => {
   const to = Math.max(0, seconds)
   if (mode === 'avplay') {
     avTime = to
+    clearNativeCueSchedule()
+    emit('cue', '')
     if (line.viaServer) return viaServer(to)
     await tz.avplaySeek(avStreamMs(to * 1000))
   } else if (video) {
@@ -1011,7 +1068,7 @@ export const switchAudio = (index, streams) => {
 // Tizen: an embedded track AVPlay reads out of the file itself. False when it can't be matched.
 export const selectNativeSubtitle = (stream, streams) => {
   if (mode !== 'avplay' || !avReady) return false
-  clearTimeout(cueTimer)
+  clearNativeCueSchedule()
   emit('cue', '')
   return applyNativeSubtitle(stream, streams)
 }
@@ -1020,7 +1077,7 @@ export const selectNativeSubtitle = (stream, streams) => {
 export const silenceNativeSubtitles = () => {
   nativeCues = false
   nativeSub = null
-  clearTimeout(cueTimer)
+  clearNativeCueSchedule()
   if (mode === 'avplay' && tz) tz.avplaySetSilentSubtitle(true)
 }
 
@@ -1119,7 +1176,7 @@ export const stop = async () => {
   clearTimers()
   dropPlayOnSeeked()
   seekWatch = null
-  clearTimeout(cueTimer)
+  clearNativeCueSchedule()
   startTimer = null
   pendingAudio = null
   pendingTracks = null

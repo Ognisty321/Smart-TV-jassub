@@ -795,16 +795,6 @@ export const avplaySetSilentSubtitle = (silent) => {
 	}
 };
 
-// Positive milliseconds hold AVPlay's own subtitles back. Samsung documents this as a time
-// correction, not a screen position, despite the method name.
-export const avplaySetSubtitlePosition = (positionMs) => {
-	if (!isAVPlayAvailable || typeof webapis.avplay.setSubtitlePosition !== 'function') return;
-	try {
-		webapis.avplay.setSubtitlePosition(Math.round(positionMs));
-	} catch (e) {
-		console.warn('[tizenVideo] Failed to set subtitle delay:', e);
-	}
-};
 
 // Tizen has few hardware decoders, so cleanup clears the element's source to free one. Sets
 // also switch to HDR for HDR video in the element and can stay there on the home screen, so

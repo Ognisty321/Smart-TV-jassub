@@ -142,13 +142,14 @@ let pgsStream = null
 export const startPgs = async (stream, at = 0) => {
   stop()
   const mine = gen
-  clock = Math.max(0, at)
-  let r = stream.inBand ? await startInBandPgs(subtitleCanvas(), stream, clock) : null
+  clock = at
+  const readAt = Math.max(0, at)
+  let r = stream.inBand ? await startInBandPgs(subtitleCanvas(), stream, readAt) : null
   // The server's extracted file stands in when the container can't be read here, a window at a time
   // where the server answers ranges.
   if (!r && mine === gen && stream.deliveryUrl) {
     const { PgsRenderer } = await import('libpgs')
-    if (mine === gen) r = await createSupWindowRenderer({ url: stream.deliveryUrl, canvas: subtitleCanvas(), PgsRenderer, at: clock })
+    if (mine === gen) r = await createSupWindowRenderer({ url: stream.deliveryUrl, canvas: subtitleCanvas(), PgsRenderer, at })
   }
   if (!r && mine === gen && stream.deliveryUrl) r = await initPgsCanvasRenderer(subtitleCanvas(), stream)
   if (mine !== gen) {
@@ -161,8 +162,8 @@ export const startPgs = async (stream, at = 0) => {
 }
 
 export const tick = (seconds) => {
-  clock = Math.max(0, seconds)
-  if (ass) setAssTime(ass, seconds)
+  clock = seconds
+  if (ass) setAssTime(ass, clock)
   else if (pgs) {
     if (pgs.needsRestart && pgs.needsRestart(clock)) {
       const stream = pgsStream
@@ -176,7 +177,7 @@ export const tick = (seconds) => {
 // Playing lets the ASS worker run its own clock between ticks, so animated lines move smoothly.
 export const setPaused = (nextPaused, seconds) => {
   paused = !!nextPaused
-  clock = Math.max(0, seconds)
+  clock = seconds
   if (ass && ass.setIsPaused) ass.setIsPaused(paused, clock)
 }
 

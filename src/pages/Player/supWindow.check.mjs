@@ -93,6 +93,10 @@ assert.ok(loads[0] < file.length / 3)
 renders.length = 0
 r.renderAtTimestamp(10.6)
 assert.deepEqual(renders, [['t', 10.6]], 'a time inside the window draws without a read')
+renders.length = 0
+r.renderAtTimestamp(-0.12)
+assert.deepEqual(renders, [['index', -1]], 'a negative compensated time draws nothing, not time zero')
+r.renderAtTimestamp(10.6)
 r.renderAtTimestamp(2)
 await new Promise((ok) => setTimeout(ok, 10))
 assert.equal(loads.length, 2, 'a seek back loads the window there')

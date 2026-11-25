@@ -736,6 +736,7 @@ export default function Player(props) {
       isLive: s.isLive,
       runTimeSeconds: (info.runTimeTicks || 0) / TICKS,
       startDelayMs: Math.max(0, Number(settings.get('videoStartDelay') || 0) * 1000),
+      nativeSubtitleDelayMs: effectiveNativeSubtitleDelayMs(),
       forceHlsJs: my.forceHlsJs,
       // A group that hasn't started has the stream wait on its first frame.
       hold: party.holdsStart(),
@@ -743,7 +744,7 @@ export default function Player(props) {
     })
     if (!gone) {
       engine.setZoom(s.zoomMode, my.aspect)
-      engine.setNativeSubtitleDelay(avplaySubtitleLatencyMs())
+      engine.setNativeSubtitleDelay(effectiveNativeSubtitleDelayMs())
     }
   }
   function startReporting() {
@@ -894,6 +895,10 @@ export default function Player(props) {
 
   function onTime(t) {
     my.pos = t
+    if (my.subtitleSeekHold) {
+      my.subtitleSeekHold = false
+      bitmapSubs.setPaused(false, primarySubtitleTime(t))
+    }
     // The display only moves when a shown second changes, so a hidden OSD costs nothing.
     if (!s.position || (s.osd && Math.floor(t) !== Math.floor(s.position))) {
       s.position = t
@@ -1154,6 +1159,7 @@ export default function Player(props) {
       s.position = at
       my.pos = at
       noteSeek()
+      resyncSubtitlesAt(at)
       if (!party.notifyLocal('seek', at)) await engine.seek(at)
       my.popups.seeked()
       bumpOsd()
@@ -1212,6 +1218,7 @@ export default function Player(props) {
     my.popups.seeked()
     s.position = at
     my.pos = at
+    resyncSubtitlesAt(at)
     if (!party.notifyLocal('seek', at)) engine.seek(at)
   }
   // Play during a held scrub commits it, landing on the scrubbed spot and playing on from there.
@@ -1355,8 +1362,14 @@ export default function Player(props) {
   function subStyle() {
     return resolveSubtitleStyleSettings(settings.all(), my.isHdr)
   }
+  function deviceSubtitleLatencyMs() {
+    return Math.max(0, Number(settings.get('avplaySubtitleLatencyMs')) || 0)
+  }
   function avplaySubtitleLatencyMs() {
-    return engine.usesAvplay() ? settings.get('avplaySubtitleLatencyMs') : 0
+    return engine.usesAvplay() ? deviceSubtitleLatencyMs() : 0
+  }
+  function effectiveNativeSubtitleDelayMs() {
+    return Math.max(0, (my.subDelay + deviceSubtitleLatencyMs() / 1000) * 1000)
   }
   function primarySubtitleDelay() {
     return subtitleDelayWithLatency(my.subDelay, avplaySubtitleLatencyMs(), true)
@@ -1366,6 +1379,14 @@ export default function Player(props) {
   }
   function secondarySubtitleDelay() {
     return subtitleDelayWithLatency(my.secDelay, avplaySubtitleLatencyMs(), engine.usesAvplay())
+  }
+  function resyncSubtitlesAt(t) {
+    updateCue(t)
+    if (my.secEvents) updateSecondaryCue(t)
+    const at = primarySubtitleTime(t)
+    my.subtitleSeekHold = !engine.isPaused()
+    bitmapSubs.setPaused(true, at)
+    bitmapSubs.tick(at)
   }
   function applySubtitleStyle() {
     const st = subStyle()
@@ -1481,6 +1502,7 @@ export default function Player(props) {
   function onOffsetChange(seconds) {
     if (s.panel === 'subOffset') {
       my.subDelay = seconds
+      engine.setNativeSubtitleDelay(effectiveNativeSubtitleDelayMs())
       updateCue(my.pos)
       bitmapSubs.tick(primarySubtitleTime(my.pos))
     } else setSecondaryDelay(seconds)
@@ -1490,8 +1512,8 @@ export default function Player(props) {
   // The strip's timeline follows the playhead while it's open.
   function updateOffsetTimeline() {
     // An ASS track drawn by libass has no cues of its own, so its timeline reads the script's lines.
-    if (s.panel === 'subOffset') s.offsetTimeline = buildSubtitleTimeline(my.cues || bitmapSubs.assEvents(), my.pos, my.subDelay)
-    else if (s.panel === 'secOffset') s.offsetTimeline = buildSubtitleTimeline(my.secEvents, my.pos, my.secDelay)
+    if (s.panel === 'subOffset') s.offsetTimeline = buildSubtitleTimeline(my.cues || bitmapSubs.assEvents(), my.pos, primarySubtitleDelay())
+    else if (s.panel === 'secOffset') s.offsetTimeline = buildSubtitleTimeline(my.secEvents, my.pos, secondarySubtitleDelay())
   }
   // The second track's settings stay on this device, settings sync never sends them.
   function onSecondaryStep(key, dir) {

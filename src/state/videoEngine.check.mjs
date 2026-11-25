@@ -183,13 +183,17 @@ globalThis.__platform = 'tizen'
   )
   assert.equal(engine.nativeSubtitleOn(), true)
   assert.equal(named('playing').length, 0, 'playing waits for the time to move')
-  // AVPlay's lines come through onsubtitlechange, cleaned, and go when their duration is up.
+  // AVPlay's lines come through onsubtitlechange, cleaned, delayed, and go when their duration is up.
+  engine.setNativeSubtitleDelay(20)
   av.listener.onsubtitlechange(30, 'Hello<br>there\r\u0000', 0)
+  assert.equal(named('cue').length, 0, 'the device latency holds the cue back')
+  await wait(30)
   assert.deepEqual(named('cue').at(-1), ['cue', 'Hello\nthere'])
   av.listener.onsubtitlechange(0, 'ignored', 1)
   assert.equal(named('cue').length, 1, 'type 1 is not text')
   await wait(50)
   assert.deepEqual(named('cue').at(-1), ['cue', ''])
+  engine.setNativeSubtitleDelay(0)
   // Time moving is what says it plays.
   av.listener.oncurrentplaytime(60000)
   av.listener.oncurrentplaytime(60500)
